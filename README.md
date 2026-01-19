@@ -16,8 +16,8 @@ cd vm-tui
 
 bun install
 ```
-```
-```
+
+
 
 ```bash
 bun dev
