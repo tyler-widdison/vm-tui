@@ -1,0 +1,29 @@
+{
+  "name": "vm-tui",
+  "version": "1.0.0",
+  "description": "VolleyMetrics/Hudl content downloader TUI",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run src/index.tsx",
+    "start": "bun run src/index.tsx"
+  },
+  "bin": {
+    "vm-tui": "./src/index.tsx"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.8"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "ink": "^6.6.0",
+    "ink-spinner": "^5.0.0",
+    "open": "^11.0.0",
+    "puppeteer": "^24.35.0",
+    "react": "^19.2.3"
+  }
+}
