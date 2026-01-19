@@ -12,7 +12,8 @@ To run:
 bun dev
 ```
 
-This project was created using `bun init` in bun v1.3.6. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+This project was made with [Opentui](https://github.com/anomalyco/opentui)
+The purpose is to provide users of volleymetrics an alternative method to gather video and dvw files. 
 
 ## Prerequisites
 
