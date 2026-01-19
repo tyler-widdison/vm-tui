@@ -7,13 +7,17 @@
          ░████     ░████ ░██ ░██                   ░████████   ░██████████ ░████████████
 # vm-tui
 
-To install dependencies:
-
-```bash
-bun install
-```
 
 To run:
+
+```bash
+git clone https://github.com/tyler-widdison/vm-tui.git
+cd vm-tui
+
+bun install
+```
+```
+```
 
 ```bash
 bun dev
