@@ -26,6 +26,7 @@ import {
   formatTeamDisplay,
   setCachedTeams,
   getCachedTeams,
+  debounce,
   type HudlAuthData,
   type MatchEvent,
   type VideoInfo,
@@ -164,6 +165,22 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
   const [downloadedCache, setDownloadedCache] = useState<Map<number, DownloadRecord>>(new Map());
   const [notification, setNotification] = useState<string | null>(null);
   
+  // Debounced search results update
+  const debouncedSearchRef = useRef<((query: string, teams: LeagueTeam[]) => void) | null>(null);
+  
+  // Initialize debounced search function
+  useEffect(() => {
+    debouncedSearchRef.current = debounce((query: string, teams: LeagueTeam[]) => {
+      if (query.length >= 2 && teams.length > 0) {
+        const results = searchTeams(teams, query, 5);
+        setSearchResults(results);
+        setSelectedResultIndex(0);
+      } else {
+        setSearchResults([]);
+      }
+    }, 150); // 150ms debounce delay
+  }, []);
+  
   // API client
   const api = useMemo(() => new HudlAPI(authData), [authData]);
   
@@ -223,14 +240,10 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
     loadTeams();
   }, [api]);
   
-  // Update search results when query changes
+  // Update search results when query changes (debounced to reduce re-renders while typing)
   useEffect(() => {
-    if (filters.teamSearchQuery.length >= 2 && allTeams.length > 0) {
-      const results = searchTeams(allTeams, filters.teamSearchQuery, 5);
-      setSearchResults(results);
-      setSelectedResultIndex(0);
-    } else {
-      setSearchResults([]);
+    if (debouncedSearchRef.current) {
+      debouncedSearchRef.current(filters.teamSearchQuery, allTeams);
     }
   }, [filters.teamSearchQuery, allTeams]);
   
@@ -294,24 +307,43 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
     setResultIndex(0);
     
     const teamId = filters.selectedTeam.id;
+    const teamName = filters.selectedTeam.name;
     
     try {
-      // Fetch larger batch since we're filtering client-side
+      // Primary approach: Use searchTerm parameter with team name
+      // This matches what the VolleyMetrics web portal does and is more efficient
       const response = await api.getOtherMatches({
         startDate: `${filters.startDate}T00:00:00.000`,
         endDate: `${filters.endDate}T23:59:00.000`,
         matchType: 'match',
         page: 1,
-        size: 200, // Larger batch for client-side filtering
+        size: 50,
+        searchTerm: teamName, // Server-side filtering by team name
       });
       
-      // Filter to only matches involving the selected team
-      const filteredContent = response.content.filter(match => 
-        matchInvolvesTeam(match, teamId)
-      );
+      let matchesContent = response.content;
+      let totalElements = response.totalElements;
+      let totalPages = response.totalPages;
+      let isLast = response.last;
+      
+      // If searchTerm returned no results, fallback to teamId filter
+      if (matchesContent.length === 0) {
+        const fallbackResponse = await api.getOtherMatches({
+          startDate: `${filters.startDate}T00:00:00.000`,
+          endDate: `${filters.endDate}T23:59:00.000`,
+          matchType: 'match',
+          page: 1,
+          size: 50,
+          teamId: teamId, // Fallback to teamId filter
+        });
+        matchesContent = fallbackResponse.content;
+        totalElements = fallbackResponse.totalElements;
+        totalPages = fallbackResponse.totalPages;
+        isLast = fallbackResponse.last;
+      }
       
       // Convert to MatchWithVideo
-      const matchesWithVideo: MatchWithVideo[] = filteredContent.map(match => ({
+      const matchesWithVideo: MatchWithVideo[] = matchesContent.map(match => ({
         ...match,
         videoStatus: 'unknown' as VideoStatus,
         downloadStatus: 'none' as DownloadStatus,
@@ -320,9 +352,9 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
       setMatches(matchesWithVideo);
       setPagination({
         currentPage: 1,
-        totalPages: response.totalPages,
-        totalMatches: filteredContent.length, // Use filtered count
-        hasMore: !response.last,
+        totalPages: totalPages,
+        totalMatches: totalElements,
+        hasMore: !isLast,
         isLoadingMore: false,
       });
       
@@ -353,35 +385,31 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
     
     try {
       const nextPage = pagination.currentPage + 1;
+      // Use searchTerm for server-side filtering (same as initial search)
       const response = await api.getOtherMatches({
         startDate: `${filters.startDate}T00:00:00.000`,
         endDate: `${filters.endDate}T23:59:00.000`,
-        teamId: selectedTeam.id,
+        searchTerm: selectedTeam.name, // Server-side filtering by team name
         matchType: 'match',
         page: nextPage,
         size: 50,
       });
       
-      // Append new matches
+      // Append new matches (already filtered by server)
       const newMatches: MatchWithVideo[] = response.content.map(match => ({
         ...match,
         videoStatus: 'unknown' as VideoStatus,
         downloadStatus: 'none' as DownloadStatus,
       }));
       
-      // Filter to only matches involving selected team
-      const filteredNewMatches = newMatches.filter(match => 
-        matchInvolvesTeam(match, selectedTeam.id)
-      );
-      
-      setMatches(matches => [...matches, ...filteredNewMatches]);
-      setPagination({
+      setMatches(prevMatches => [...prevMatches, ...newMatches]);
+      setPagination(prev => ({
         currentPage: nextPage,
         totalPages: response.totalPages,
-        totalMatches: matches.length + filteredNewMatches.length,
+        totalMatches: response.totalElements,
         hasMore: !response.last,
         isLoadingMore: false,
-      });
+      }));
       
     } catch (err) {
       console.error('Failed to load more matches:', err);
@@ -831,8 +859,11 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
               ) : (
                 <>
                   {flatList.map((item, index) => {
-                    // Windowed rendering - only show items near the current index
-                    if (index < resultIndex - 10 || index > resultIndex + 15) {
+                    // Smart windowed rendering:
+                    // - For small result sets (<40 items): render all items (no jumping)
+                    // - For larger sets: use windowed rendering for performance
+                    const useWindowing = flatList.length >= 40;
+                    if (useWindowing && (index < resultIndex - 30 || index > resultIndex + 50)) {
                       return null;
                     }
                     

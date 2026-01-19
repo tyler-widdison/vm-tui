@@ -244,8 +244,6 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
           marginBottom={1}
         >
           <Box flexGrow={1}>
-            <Text color={theme.primary} bold>{app.name}</Text>
-            <Text color={theme.textDim}> - </Text>
             <Text color={theme.text}>{userInfo.name}</Text>
           </Box>
         </Box>

@@ -187,6 +187,7 @@ export interface GetMatchesParams {
   matchType?: 'match' | 'practice';
   sort?: string[];   // e.g., ['matchDate,desc', 'id,desc']
   teamId?: number;   // Filter by specific team ID
+  searchTerm?: string; // Search by team name (e.g., "University of Utah")
 }
 
 /**
@@ -427,6 +428,7 @@ export class HudlAPI {
    *   matchType: 'match',
    *   page: 1,
    *   size: 20,
+   *   searchTerm: 'University of Utah',
    * });
    */
   async getOtherMatches(params: GetMatchesParams): Promise<MatchesResponse> {
@@ -448,6 +450,11 @@ export class HudlAPI {
     // Team filter (matches where team is home OR away)
     if (params.teamId) {
       searchParams.set('teamId', String(params.teamId));
+    }
+    
+    // Search term filter (team name search)
+    if (params.searchTerm) {
+      searchParams.set('searchTerm', params.searchTerm);
     }
     
     // Sorting - default to newest first
