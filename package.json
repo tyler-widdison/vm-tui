@@ -1,12 +1,15 @@
 {
   "name": "vm-tui",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "VolleyMetrics/Hudl content downloader TUI",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "bun run src/index.tsx",
-    "start": "bun run src/index.tsx"
+    "start": "bun run src/index.tsx",
+    "version:patch": "npm version patch -m 'chore: bump version to %s'",
+    "version:minor": "npm version minor -m 'chore: bump version to %s'",
+    "version:major": "npm version major -m 'chore: bump version to %s'"
   },
   "bin": {
     "vm-tui": "./src/index.tsx"
