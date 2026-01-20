@@ -5,8 +5,8 @@
      ░████   ░████ ░████ ░██ ░██                 ░████       ░████   ░████     ░████    
        ░████████   ░████ ░██ ░██                 ░████       ░████   ░████     ░████    
          ░████     ░████ ░██ ░██                   ░████████   ░██████████ ░████████████
-# vm-tui
 
+The purpose is to provide users of volleymetrics an alternative method to gather video and dvw files.
 
 To run:
 
@@ -18,8 +18,6 @@ bun dev
 ```
 
 This project was made with [Opentui](https://github.com/anomalyco/opentui)
-The purpose is to provide users of volleymetrics an alternative method to gather video and dvw files.
-
 
 This project uses **Bun**.
 If you don't have Bun installed, install it first:
