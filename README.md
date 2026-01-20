@@ -13,13 +13,7 @@ To run:
 ```bash
 git clone https://github.com/tyler-widdison/vm-tui.git
 cd vm-tui
-
 bun install
-```
-
-
-
-```bash
 bun dev
 ```
 
@@ -29,7 +23,6 @@ The purpose is to provide users of volleymetrics an alternative method to gather
 
 This project uses **Bun**.
 If you don't have Bun installed, install it first:
-
 https://bun.com/docs/installation
 
 ### Quick install
