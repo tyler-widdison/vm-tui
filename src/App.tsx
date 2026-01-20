@@ -1,14 +1,19 @@
 import React, { useState, useCallback, useEffect } from 'react';
+import { Box, Text } from 'ink';
+import Spinner from 'ink-spinner';
 import { FullScreen } from './components/FullScreen.js';
 import { LandingPage } from './components/LandingPage.js';
 import { AuthenticatingPage } from './components/AuthenticatingPage.tsx';
 import { ErrorPage } from './components/ErrorPage.js';
 import { DashboardPage } from './components/DashboardPage.js';
+import { theme } from './theme.js';
 import {
   authenticateWithHudl,
   loadAuthData,
   saveAuthData,
   testAPIConnection,
+  isTokenExpired,
+  extractUserFromToken,
   type HudlAuthData,
 } from './lib/index.js';
 import type { Screen } from './types.js';
@@ -33,7 +38,43 @@ export function App() {
       try {
         const existingAuth = await loadAuthData();
         if (existingAuth) {
-          // Test if the token still works
+          // Quick local check: is the token expired?
+          if (isTokenExpired(existingAuth.access_token)) {
+            // Token expired, need to re-login
+            setIsCheckingAuth(false);
+            return;
+          }
+          
+          // Try to extract user info from JWT first (instant, no network)
+          const jwtUser = extractUserFromToken(existingAuth.access_token);
+          if (jwtUser) {
+            // We have valid token and can extract user info locally
+            // Set auth data immediately for fast startup
+            setAuthData(existingAuth);
+            setUserInfo({
+              name: jwtUser.name,
+              email: jwtUser.email,
+              teams: [{ id: jwtUser.teamId, name: 'Loading...' }], // Placeholder
+            });
+            setScreen('dashboard');
+            setIsCheckingAuth(false);
+            
+            // Fetch full team info in background (non-blocking)
+            testAPIConnection(existingAuth).then(testResult => {
+              if (testResult.success && testResult.user && testResult.teams) {
+                setUserInfo({
+                  name: testResult.user.name,
+                  email: testResult.user.email,
+                  teams: testResult.teams,
+                });
+              }
+            }).catch(() => {
+              // Ignore background fetch errors - we're already logged in
+            });
+            return;
+          }
+          
+          // Fallback: JWT extraction failed, do full API check
           const testResult = await testAPIConnection(existingAuth);
           if (testResult.success && testResult.user && testResult.teams) {
             setAuthData(existingAuth);
@@ -125,9 +166,18 @@ export function App() {
     setScreen('landing');
   }, []);
 
-  // Show nothing while checking auth
+  // Show loading screen while checking auth
   if (isCheckingAuth) {
-    return null;
+    return (
+      <FullScreen>
+        <Box flexDirection="column" alignItems="center" justifyContent="center" height="100%">
+          <Text color={theme.primary}>
+            <Spinner type="dots" />
+            <Text> Loading...</Text>
+          </Text>
+        </Box>
+      </FullScreen>
+    );
   }
 
   return (

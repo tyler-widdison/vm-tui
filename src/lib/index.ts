@@ -28,6 +28,8 @@ export {
   APIError,
   testAPIConnection,
   VIDEO_CDN_BASE_URL,
+  DVW_GENERATE_URL,
+  generateDVWFilename,
   type AccountsResponse,
   type Account,
   type Team,
@@ -39,6 +41,8 @@ export {
   type MatchesResponse,
   type GetMatchesParams,
   type VideoInfo,
+  type DVWInfo,
+  type ContentAvailability,
   type MatchAnalysis,
   type TeamInfo,
   type ConferenceInfo,
@@ -68,24 +72,36 @@ export {
 // Download utilities
 export {
   downloadVideo,
+  downloadDVW,
   generateVideoFilename,
   getDownloadDir,
   formatBytes,
   formatSpeed,
+  openDownloadDir,
+  getDisplayPath,
+  generateBulkFolderName,
+  sanitizeFolderName,
   type DownloadProgress,
   type DownloadProgressCallback,
   type DownloadResult,
+  type DownloadOptions,
 } from './download.js';
 
 // Download tracker (persistence)
 export {
   markAsDownloaded,
+  markDVWAsDownloaded,
   getDownloadRecord,
   isDownloaded,
+  isDVWDownloaded,
+  isVideoDownloaded,
   getDownloadedMatches,
+  getDownloadedDVWs,
+  getDownloadedVideos,
   removeDownloadRecord,
   getDownloadedFilepath,
   type DownloadRecord,
+  type ContentType,
 } from './downloadTracker.js';
 
 // Download context (global download state)
@@ -95,6 +111,7 @@ export {
   type CompletedDownload,
   type DownloadManagerListener,
   type DownloadManagerState,
+  type BatchProgress,
 } from './downloadContext.js';
 
 // Utilities

@@ -6,7 +6,10 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import type { MatchEvent, VideoInfo } from './api.js';
+import open from 'open';
+import type { MatchEvent, VideoInfo, DVWInfo } from './api.js';
+import { HudlAPI } from './api.js';
+import type { HudlAuthData } from './auth.js';
 import { throttle } from './throttle.js';
 
 // ============================================
@@ -31,6 +34,10 @@ export interface DownloadResult {
   error?: string;
 }
 
+export interface DownloadOptions {
+  customFolder?: string;  // Custom folder name for bulk downloads
+}
+
 // ============================================
 // Configuration
 // ============================================
@@ -39,10 +46,32 @@ export interface DownloadResult {
 const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), 'Downloads', 'VM-TUI');
 
 /**
- * Get the download directory, creating it if needed
+ * Open the download directory in system file browser
  */
-export async function getDownloadDir(): Promise<string> {
-  const dir = DEFAULT_DOWNLOAD_DIR;
+export async function openDownloadDir(): Promise<void> {
+  const dir = await getDownloadDir();
+  await open(dir);
+}
+
+/**
+ * Get shortened display path (with ~ for home directory)
+ */
+export function getDisplayPath(): string {
+  const fullPath = DEFAULT_DOWNLOAD_DIR;
+  const home = os.homedir();
+  return fullPath.replace(home, '~');
+}
+
+/**
+ * Get the download directory, creating it if needed
+ * Supports custom folder option for bulk downloads
+ */
+export async function getDownloadDir(options?: DownloadOptions): Promise<string> {
+  let dir = DEFAULT_DOWNLOAD_DIR;
+  
+  if (options?.customFolder) {
+    dir = path.join(DEFAULT_DOWNLOAD_DIR, sanitizeFolderName(options.customFolder));
+  }
   
   try {
     await fs.promises.mkdir(dir, { recursive: true });
@@ -51,6 +80,36 @@ export async function getDownloadDir(): Promise<string> {
   }
   
   return dir;
+}
+
+/**
+ * Generate default folder name for bulk download
+ * Format: TeamName-YYYY-MM-DD-HHMM-SS (to avoid collisions)
+ */
+export function generateBulkFolderName(teamName?: string): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  
+  const timestamp = `${year}-${month}-${day}-${hours}${minutes}${seconds}`;
+  
+  if (teamName) {
+    const sanitized = teamName.replace(/[^a-zA-Z0-9]/g, '-');
+    return `${sanitized}-${timestamp}`;
+  }
+  
+  return timestamp;
+}
+
+/**
+ * Sanitize a folder name to remove invalid characters
+ */
+export function sanitizeFolderName(name: string): string {
+  return name.replace(/[<>:"/\\|?*]/g, '_');
 }
 
 // ============================================
@@ -104,14 +163,16 @@ function sanitizeFilename(filename: string): string {
  * @param videoInfo Video information with URL
  * @param match Match event data for filename
  * @param onProgress Progress callback
+ * @param options Download options (custom folder for bulk downloads)
  * @returns Download result
  */
 export async function downloadVideo(
   videoInfo: VideoInfo,
   match: MatchEvent,
-  onProgress?: DownloadProgressCallback
+  onProgress?: DownloadProgressCallback,
+  options?: DownloadOptions
 ): Promise<DownloadResult> {
-  const downloadDir = await getDownloadDir();
+  const downloadDir = await getDownloadDir(options);
   const filename = sanitizeFilename(generateVideoFilename(match));
   const filepath = path.join(downloadDir, filename);
   
@@ -248,4 +309,112 @@ export function formatBytes(bytes: number): string {
  */
 export function formatSpeed(bytesPerSecond: number): string {
   return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+// ============================================
+// DVW Download Functions
+// ============================================
+
+/**
+ * Download a DVW file with progress tracking
+ * DVW files are text-based and typically small, so download is simpler than video
+ * 
+ * @param dvwInfo DVW file information
+ * @param match Match event data for filename
+ * @param authData Authentication data for API access
+ * @param onProgress Progress callback
+ * @param options Download options (custom folder for bulk downloads)
+ * @returns Download result
+ */
+export async function downloadDVW(
+  dvwInfo: DVWInfo,
+  match: MatchEvent,
+  authData: HudlAuthData,
+  onProgress?: DownloadProgressCallback,
+  options?: DownloadOptions
+): Promise<DownloadResult> {
+  const downloadDir = await getDownloadDir(options);
+  const filename = sanitizeFilename(dvwInfo.filename);
+  const filepath = path.join(downloadDir, filename);
+  
+  // Initialize progress
+  const progress: DownloadProgress = {
+    matchId: match.id,
+    filename,
+    bytesDownloaded: 0,
+    totalBytes: 0,
+    percent: 0,
+    status: 'pending',
+  };
+  
+  onProgress?.(progress);
+  
+  try {
+    // Check if file already exists
+    try {
+      const stats = await fs.promises.stat(filepath);
+      if (stats.size > 0) {
+        // File exists and has content, consider it complete
+        return {
+          success: true,
+          filepath,
+        };
+      }
+    } catch {
+      // File doesn't exist, continue with download
+    }
+    
+    // Start download
+    progress.status = 'downloading';
+    onProgress?.(progress);
+    
+    console.log(`[DVW] Starting download for match ${match.id}: ${dvwInfo.filename}`);
+    
+    // Use API to download DVW content
+    const api = new HudlAPI(authData);
+    const content = await api.downloadDVWContent(match.id);
+    
+    console.log(`[DVW] Download result for match ${match.id}: ${content ? `${content.length} bytes` : 'null'}`);
+    
+    if (!content) {
+      throw new Error('DVW file not available or invalid format');
+    }
+    
+    // Calculate size
+    const contentSize = Buffer.byteLength(content, 'utf-8');
+    progress.totalBytes = contentSize;
+    progress.bytesDownloaded = contentSize;
+    progress.percent = 100;
+    
+    // Write to file
+    await fs.promises.writeFile(filepath, content, 'utf-8');
+    
+    // Mark as completed
+    progress.status = 'completed';
+    onProgress?.(progress);
+    
+    return {
+      success: true,
+      filepath,
+    };
+    
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+    
+    progress.status = 'error';
+    progress.error = errorMessage;
+    onProgress?.(progress);
+    
+    // Clean up partial file
+    try {
+      await fs.promises.unlink(filepath);
+    } catch {
+      // Ignore cleanup errors
+    }
+    
+    return {
+      success: false,
+      error: errorMessage,
+    };
+  }
 }

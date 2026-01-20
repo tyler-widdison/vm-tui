@@ -4,6 +4,8 @@ import Spinner from 'ink-spinner';
 import { theme, borderStyle, app } from '../theme.js';
 import { ContentBrowser } from './ContentBrowser.js';
 import { OtherMatchesPage } from './OtherMatchesPage.js';
+import { TeamDVWBrowser } from './TeamDVWBrowser.js';
+import { OtherDVWBrowser } from './OtherDVWBrowser.js';
 import { Logo } from './Logo.js';
 import { downloadManager, formatBytes, type DownloadManagerState } from '../lib/index.js';
 import type { HudlAuthData } from '../lib/index.js';
@@ -20,20 +22,33 @@ interface DashboardPageProps {
   onLogout: () => void;
 }
 
-type DashboardView = 'overview' | 'my-videos' | 'other-videos';
+type DashboardView = 'overview' | 'my-videos' | 'other-videos' | 'team-dvw' | 'other-dvw';
 
 // Global status bar showing downloads and notifications
 function GlobalStatusBar({ state }: { state: DownloadManagerState }) {
   const activeDownloads = Array.from(state.activeDownloads.values());
   const hasActiveDownloads = activeDownloads.length > 0;
   const hasNotifications = state.notifications.length > 0;
+  const hasBatchProgress = state.batchProgress !== null && state.batchProgress.total > 0;
   
-  if (!hasActiveDownloads && !hasNotifications) {
+  if (!hasActiveDownloads && !hasNotifications && !hasBatchProgress) {
     return null;
   }
   
   return (
     <Box flexDirection="column" marginTop={1}>
+      {/* Batch progress indicator */}
+      {hasBatchProgress && (
+        <Box paddingX={1}>
+          <Text color={theme.primary}>
+            <Spinner type="dots" />
+          </Text>
+          <Text color={theme.accent}> Batch: </Text>
+          <Text color={theme.text}>{state.batchProgress!.current}/{state.batchProgress!.total}</Text>
+          <Text color={theme.textMuted}> videos</Text>
+        </Box>
+      )}
+      
       {/* Active downloads */}
       {activeDownloads.map(download => {
         const { progress } = download;
@@ -63,9 +78,9 @@ function GlobalStatusBar({ state }: { state: DownloadManagerState }) {
   );
 }
 
-type MenuItem = 'team-matches' | 'other-matches' | 'dvw' | 'scoresheets';
-const MENU_ITEMS: MenuItem[] = ['team-matches', 'other-matches', 'dvw', 'scoresheets'];
-const ENABLED_ITEMS: MenuItem[] = ['team-matches', 'other-matches'];
+type MenuItem = 'team-matches' | 'other-matches' | 'team-dvw' | 'other-dvw' | 'scoresheets';
+const MENU_ITEMS: MenuItem[] = ['team-matches', 'other-matches', 'team-dvw', 'other-dvw', 'scoresheets'];
+const ENABLED_ITEMS: MenuItem[] = ['team-matches', 'other-matches', 'team-dvw', 'other-dvw'];
 
 export function DashboardPage({ authData, userInfo, onLogout }: DashboardPageProps) {
   const { exit } = useApp();
@@ -96,6 +111,12 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
     if (input === 'o') {
       setView('other-videos');
     }
+    if (input === 'd') {
+      setView('team-dvw');
+    }
+    if (input === 'e') {
+      setView('other-dvw');
+    }
     
     // Arrow key navigation
     if (key.upArrow || input === 'k') {
@@ -117,8 +138,12 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
         setView('my-videos');
       } else if (selectedItem === 'other-matches') {
         setView('other-videos');
+      } else if (selectedItem === 'team-dvw') {
+        setView('team-dvw');
+      } else if (selectedItem === 'other-dvw') {
+        setView('other-dvw');
       }
-      // dvw and scoresheets are disabled
+      // scoresheets still disabled
     }
   });
 
@@ -199,6 +224,90 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
           
           {/* Other matches browser */}
           <OtherMatchesPage
+            authData={authData}
+            onBack={() => setView('overview')}
+          />
+        </Box>
+        
+        {/* Global status bar */}
+        <GlobalStatusBar state={downloadState} />
+      </Box>
+    );
+  }
+
+  // Render team DVW browser view
+  if (view === 'team-dvw') {
+    return (
+      <Box
+        flexDirection="column"
+        width="100%"
+        height="100%"
+      >
+        <Box
+          flexDirection="column"
+          borderStyle={borderStyle}
+          borderColor={theme.border}
+          paddingX={2}
+          paddingY={1}
+          flexGrow={1}
+        >
+          {/* Header bar */}
+          <Box marginBottom={1}>
+            <Text color={theme.primary} bold>{app.name}</Text>
+            <Text color={theme.textDim}> - </Text>
+            <Text color={theme.text}>{userInfo.name}</Text>
+            {activeTeam && (
+              <>
+                <Text color={theme.textDim}> | </Text>
+                <Text color={theme.accent}>{activeTeam.name}</Text>
+              </>
+            )}
+          </Box>
+          
+          {/* Team DVW browser */}
+          <TeamDVWBrowser
+            authData={authData}
+            onBack={() => setView('overview')}
+          />
+        </Box>
+        
+        {/* Global status bar */}
+        <GlobalStatusBar state={downloadState} />
+      </Box>
+    );
+  }
+
+  // Render other DVW browser view
+  if (view === 'other-dvw') {
+    return (
+      <Box
+        flexDirection="column"
+        width="100%"
+        height="100%"
+      >
+        <Box
+          flexDirection="column"
+          borderStyle={borderStyle}
+          borderColor={theme.border}
+          paddingX={2}
+          paddingY={1}
+          flexGrow={1}
+        >
+          {/* Header bar */}
+          <Box marginBottom={1}>
+            <Text color={theme.primary} bold>{app.name}</Text>
+            <Text color={theme.textDim}> - </Text>
+            <Text color={theme.text}>{userInfo.name}</Text>
+            {activeTeam && (
+              <>
+                <Text color={theme.textDim}> | </Text>
+                <Text color={theme.accent}>{activeTeam.name}</Text>
+              </>
+            )}
+          </Box>
+          
+          {/* Other DVW browser */}
+          <OtherDVWBrowser
             authData={authData}
             onBack={() => setView('overview')}
           />
@@ -294,7 +403,7 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
               color={selectedItem === 'team-matches' ? theme.primary : theme.text}
             >
               {selectedItem === 'team-matches' ? '>' : ' '}
-              <Text color={theme.primary}>[v]</Text> {activeTeam?.name || 'My'} Matches
+              <Text color={theme.primary}>[v]</Text> {activeTeam?.name || 'My'} Matches - video
             </Text>
           </Box>
           <Box>
@@ -303,16 +412,25 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
               color={selectedItem === 'other-matches' ? theme.primary : theme.text}
             >
               {selectedItem === 'other-matches' ? '>' : ' '}
-              <Text color={theme.primary}>[o]</Text> Other Matches
+              <Text color={theme.primary}>[o]</Text> Other Matches - video
             </Text>
           </Box>
           <Box>
             <Text 
-              backgroundColor={selectedItem === 'dvw' ? theme.backgroundElement : undefined}
-              color={theme.textDim}
+              backgroundColor={selectedItem === 'team-dvw' ? theme.backgroundElement : undefined}
+              color={selectedItem === 'team-dvw' ? theme.primary : theme.text}
             >
-              {selectedItem === 'dvw' ? '>' : ' '}
-              <Text color={theme.textDim}>[d]</Text> DVW Files (coming soon)
+              {selectedItem === 'team-dvw' ? '>' : ' '}
+              <Text color={theme.primary}>[d]</Text> DVW Files - {activeTeam?.name}
+            </Text>
+          </Box>
+          <Box>
+            <Text 
+              backgroundColor={selectedItem === 'other-dvw' ? theme.backgroundElement : undefined}
+              color={selectedItem === 'other-dvw' ? theme.primary : theme.text}
+            >
+              {selectedItem === 'other-dvw' ? '>' : ' '}
+              <Text color={theme.primary}>[e]</Text> Other DVW Files
             </Text>
           </Box>
           <Box>
@@ -321,7 +439,7 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
               color={theme.textDim}
             >
               {selectedItem === 'scoresheets' ? '>' : ' '}
-              <Text color={theme.textDim}>[s]</Text> Scoresheets (coming soon)
+              <Text color={theme.textDim}>[s]</Text> Scoresheets - {activeTeam?.name} (coming soon)
             </Text>
           </Box>
         </Box>
@@ -337,8 +455,10 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
           marginTop={1}
         >
           <Text color={theme.textDim}>
-            <Text color={theme.textMuted}>'v'</Text> team matches  
-            <Text color={theme.textMuted}> 'o'</Text> other matches  
+            <Text color={theme.textMuted}>'v'</Text> team videos  
+            <Text color={theme.textMuted}> 'o'</Text> other videos  
+            <Text color={theme.textMuted}> 'd'</Text> team DVW  
+            <Text color={theme.textMuted}> 'e'</Text> other DVW  
             <Text color={theme.textMuted}> 'l'</Text> logout  
             <Text color={theme.textMuted}> 'q'</Text> quit
           </Text>

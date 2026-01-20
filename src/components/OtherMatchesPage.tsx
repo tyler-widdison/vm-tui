@@ -27,6 +27,10 @@ import {
   setCachedTeams,
   getCachedTeams,
   debounce,
+  getDisplayPath,
+  openDownloadDir,
+  getStoredUser,
+  type DownloadOptions,
   type HudlAuthData,
   type MatchEvent,
   type VideoInfo,
@@ -35,6 +39,8 @@ import {
   type LeagueTeam,
   type TeamSearchResult,
 } from '../lib/index.js';
+
+import { FolderPrompt } from './FolderPrompt.js';
 
 // ============================================
 // Types
@@ -74,8 +80,14 @@ interface MatchWithVideo extends MatchEvent {
   downloadRecord?: DownloadRecord;
 }
 
-type FocusArea = 'filters' | 'results';
+type FocusArea = 'filters' | 'results' | 'selection';
 type FilterField = 'teamSearch' | 'startDate' | 'endDate';
+
+interface BatchProgress {
+  current: number;
+  total: number;
+  currentMatchId?: number;
+}
 
 // ============================================
 // Helper Functions
@@ -164,6 +176,18 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
   const [videoCache] = useState<Map<number, VideoInfo>>(new Map());
   const [downloadedCache, setDownloadedCache] = useState<Map<number, DownloadRecord>>(new Map());
   const [notification, setNotification] = useState<string | null>(null);
+  
+  // Selection state for batch downloads
+  const [selectedMatches, setSelectedMatches] = useState<Set<number>>(new Set());
+  const [isBatchDownloading, setIsBatchDownloading] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<BatchProgress>({ current: 0, total: 0 });
+  
+  // Folder prompt state
+  const [showFolderPrompt, setShowFolderPrompt] = useState(false);
+  const [customFolder, setCustomFolder] = useState<string | null>(null);
+  
+  // User team abbreviation
+  const [userTeamAbbr, setUserTeamAbbr] = useState<string>('');
   
   // Debounced search results update
   const debouncedSearchRef = useRef<((query: string, teams: LeagueTeam[]) => void) | null>(null);
@@ -259,6 +283,25 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
     }
     loadDownloadedStatus();
   }, []);
+  
+  // Load user team abbreviation on mount
+  useEffect(() => {
+    async function loadUserTeam() {
+      try {
+        const user = await getStoredUser();
+        if (user && user.teamId) {
+          const accountsResponse = await api.getAccounts();
+          const activeAccount = accountsResponse.accounts.find(acc => acc.teamId === user.teamId);
+          if (activeAccount) {
+            setUserTeamAbbr(activeAccount.team.abbreviation);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load user team:', err);
+      }
+    }
+    loadUserTeam();
+  }, [api]);
   
   // Update matches with download status
   useEffect(() => {
@@ -506,6 +549,7 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
         filepath: result.filepath,
         filename,
         downloadedAt: new Date().toISOString(),
+        contentType: 'video',
       };
       setDownloadedCache(prev => new Map(prev).set(match.id, newRecord));
       
@@ -523,6 +567,121 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
     }
   }, []);
   
+  // Batch download selected matches
+  const downloadSelectedMatches = useCallback(async (customFolder: string | null = null) => {
+    if (selectedMatches.size === 0 || isBatchDownloading) return;
+    
+    setIsBatchDownloading(true);
+    const matchesToDownload = matches.filter(m => selectedMatches.has(m.id));
+    setBatchProgress({ current: 0, total: matchesToDownload.length });
+    downloadManager.setBatchProgress({ current: 0, total: matchesToDownload.length });
+    
+    const downloadOptions: DownloadOptions | undefined = customFolder ? { customFolder } : undefined;
+    
+    let successCount = 0;
+    let skipCount = 0;
+    let errorCount = 0;
+    
+    for (let i = 0; i < matchesToDownload.length; i++) {
+      const match = matchesToDownload[i]!;
+      const progress = { current: i + 1, total: matchesToDownload.length, currentMatchId: match.id };
+      setBatchProgress(progress);
+      downloadManager.setBatchProgress(progress);
+      
+      // Skip if already downloaded
+      if (match.downloadStatus === 'previously_downloaded' || 
+          match.downloadStatus === 'completed') {
+        skipCount++;
+        continue;
+      }
+      
+      // Skip future matches
+      if (isMatchInFuture(match.matchDate)) {
+        skipCount++;
+        continue;
+      }
+      
+      // Check video availability first (sequential)
+      setMatches(prev => prev.map(m => 
+        m.id === match.id ? { ...m, videoStatus: 'checking' as VideoStatus } : m
+      ));
+      
+      try {
+        let videoInfo = match.videoInfo;
+        
+        // If no video info cached, fetch it
+        if (!videoInfo || !match.videoInfo?.checked) {
+          videoInfo = await api.findVideoUrl(match);
+          videoCache.set(match.id, videoInfo);
+        }
+        
+        // Update video status
+        setMatches(prev => prev.map(m => 
+          m.id === match.id 
+            ? { ...m, videoStatus: videoInfo!.available ? 'available' : 'unavailable', videoInfo }
+            : m
+        ));
+        
+        // If available, download it
+        if (videoInfo.available) {
+          setMatches(prev => prev.map(m => 
+            m.id === match.id ? { ...m, downloadStatus: 'downloading' as DownloadStatus } : m
+          ));
+          
+          const result = await downloadManager.startDownload(match, videoInfo, downloadOptions);
+          
+          if (result.success && result.filepath) {
+            successCount++;
+            const filename = generateVideoFilename(match);
+            const newRecord: DownloadRecord = {
+              matchId: match.id,
+              filepath: result.filepath,
+              filename,
+              downloadedAt: new Date().toISOString(),
+              contentType: 'video',
+            };
+            setDownloadedCache(prev => new Map(prev).set(match.id, newRecord));
+            
+            setMatches(prev => prev.map(m => 
+              m.id === match.id 
+                ? { ...m, downloadStatus: 'completed' as DownloadStatus, downloadRecord: newRecord }
+                : m
+            ));
+          } else {
+            errorCount++;
+            setMatches(prev => prev.map(m => 
+              m.id === match.id ? { ...m, downloadStatus: 'error' as DownloadStatus } : m
+            ));
+          }
+        } else {
+          // Video not available, skip it
+          skipCount++;
+        }
+        
+      } catch (err) {
+        errorCount++;
+        setMatches(prev => prev.map(m => 
+          m.id === match.id ? { ...m, videoStatus: 'unavailable' as VideoStatus } : m
+        ));
+      }
+    }
+    
+    // Clear selection after batch download
+    setSelectedMatches(new Set());
+    setIsBatchDownloading(false);
+    setBatchProgress({ current: 0, total: 0 });
+    downloadManager.setBatchProgress(null);
+    
+    // Show summary notification
+    const parts: string[] = [];
+    if (successCount > 0) parts.push(`${successCount} downloaded`);
+    if (skipCount > 0) parts.push(`${skipCount} skipped`);
+    if (errorCount > 0) parts.push(`${errorCount} failed`);
+    setNotification(`Batch complete: ${parts.join(', ')}`);
+    setTimeout(() => setNotification(null), 5000);
+    
+  }, [selectedMatches, matches, isBatchDownloading, api, videoCache]);
+  
   // ============================================
   // Keyboard Handler
   // ============================================
@@ -530,11 +689,15 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
   useInput((input, key) => {
     // Tab to switch focus areas (only if we have results)
     if (key.tab && hasSearched) {
-      setFocusArea(prev => prev === 'filters' ? 'results' : 'filters');
+      setFocusArea(prev => {
+        if (prev === 'filters') return 'results';
+        if (prev === 'results') return selectedMatches.size > 0 ? 'selection' : 'filters';
+        return 'filters';
+      });
       return;
     }
     
-    // Back
+    // Back (downloads continue in background)
     if (key.escape) {
       onBack();
       return;
@@ -543,7 +706,7 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
     // ----------------
     // Filter Panel
     // ----------------
-    if (focusArea === 'filters') {
+    if (focusArea === 'filters' && !showFolderPrompt) {
       const filterFields: FilterField[] = ['teamSearch', 'startDate', 'endDate'];
       
       // Navigate fields (only when not showing autocomplete)
@@ -624,7 +787,7 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
     // ----------------
     // Results Panel
     // ----------------
-    if (focusArea === 'results') {
+    if (focusArea === 'results' && !showFolderPrompt) {
       // Navigate
       if (key.upArrow || input === 'k') {
         setResultIndex(prev => Math.max(0, prev - 1));
@@ -641,6 +804,41 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
         }
       }
       
+      // Space bar - toggle selection
+      if (input === ' ') {
+        const item = flatList[resultIndex];
+        if (item?.type === 'match') {
+          const match = item.match;
+          const isFuture = isMatchInFuture(match.matchDate);
+          const isDownloading = match.downloadStatus === 'downloading';
+          
+          // Don't allow selecting future matches or currently downloading
+          if (!isFuture && !isDownloading && !isBatchDownloading) {
+            setSelectedMatches(prev => {
+              const next = new Set(prev);
+              if (next.has(match.id)) {
+                next.delete(match.id);
+              } else {
+                next.add(match.id);
+              }
+              return next;
+            });
+            
+            // Show notification if already downloaded
+            const alreadyDownloaded = match.downloadStatus === 'previously_downloaded' || 
+                                       match.downloadStatus === 'completed';
+            if (alreadyDownloaded && !selectedMatches.has(match.id)) {
+              setNotification('Already downloaded - will skip in batch');
+              setTimeout(() => setNotification(null), 2000);
+            }
+          } else if (isFuture) {
+            setNotification('Cannot select future matches');
+            setTimeout(() => setNotification(null), 2000);
+          }
+        }
+        return;
+      }
+      
       // Check video
       if (input === 'v') {
         const item = flatList[resultIndex];
@@ -650,13 +848,48 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
         }
       }
       
-      // Download
-      if (input === 'd') {
+      // Single download (lowercase d)
+      if (input === 'd' && !isBatchDownloading) {
         const item = flatList[resultIndex];
         if (item?.type === 'match') {
           downloadMatchVideo(item.match);
         }
       }
+      
+      // Clear selection (c key)
+      if (input === 'c' && selectedMatches.size > 0 && !isBatchDownloading) {
+        setSelectedMatches(new Set());
+        setNotification('Selection cleared');
+        setTimeout(() => setNotification(null), 1500);
+      }
+    }
+    
+    // ----------------
+    // Selection Panel
+    // ----------------
+    if (focusArea === 'selection' && !showFolderPrompt) {
+      // Clear selection (c key)
+      if (input === 'c' && selectedMatches.size > 0 && !isBatchDownloading) {
+        setSelectedMatches(new Set());
+        setFocusArea('results');
+        setNotification('Selection cleared');
+        setTimeout(() => setNotification(null), 1500);
+      }
+    }
+    
+    // ----------------
+    // Global: Batch Download (D key - uppercase)
+    // ----------------
+    if (input === 'D' && selectedMatches.size > 0 && !isBatchDownloading && !showFolderPrompt) {
+      setShowFolderPrompt(true);
+    }
+    
+    // Open download folder (p key)
+    if (input === 'p' && !showFolderPrompt) {
+      openDownloadDir().catch(err => {
+        setNotification('Could not open folder: ' + err.message);
+        setTimeout(() => setNotification(null), 3000);
+      });
     }
   });
   
@@ -937,9 +1170,16 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
                     const awayConf = formatConferenceDisplay(match.awayTeam.conference);
                     const confDisplay = homeConf === awayConf ? `[${homeConf}]` : `[${awayConf}|${homeConf}]`;
                     
+                    // Checkbox state
+                    const isSelected = selectedMatches.has(match.id);
+                    const canSelect = !isFutureMatch && match.downloadStatus !== 'downloading';
+                    const checkboxChar = isSelected ? 'x' : ' ';
+                    const checkboxColor = !canSelect ? theme.textDim : isSelected ? theme.success : theme.textMuted;
+                    
                     return (
                       <Box key={`match-${match.id}`} paddingLeft={2}>
                         <Text backgroundColor={isFocused ? theme.backgroundElement : undefined}>
+                          <Text color={checkboxColor}>[{checkboxChar}]</Text>
                           <Text color={statusColor}>[{statusIndicator}]</Text>
                           <Text color={isFocused ? theme.primary : theme.text}> {dateStr}</Text>
                           <Text color={theme.textMuted}> - </Text>
@@ -975,6 +1215,76 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
             </Box>
           )}
         </Box>
+        
+        {/* Right: Selection Panel */}
+        {hasSearched && (
+          <Box 
+            flexDirection="column" 
+            width={28}
+            borderStyle={borderStyle}
+            borderColor={focusArea === 'selection' ? theme.primary : theme.border}
+            paddingX={1}
+            paddingY={1}
+            marginLeft={1}
+          >
+            <Text color={theme.accent} bold>Selection</Text>
+            
+            {selectedMatches.size === 0 ? (
+              <Box marginTop={1} flexDirection="column">
+                <Text color={theme.textMuted}>No videos selected</Text>
+                <Text color={theme.textDim}>Press Space to select</Text>
+              </Box>
+            ) : (
+              <>
+                <Box marginTop={1}>
+                  <Text color={theme.primary} bold>{selectedMatches.size}</Text>
+                  <Text color={theme.text}> video{selectedMatches.size !== 1 ? 's' : ''} selected</Text>
+                </Box>
+                
+                {/* Show list of selected matches (abbreviated) */}
+                <Box flexDirection="column" marginTop={1}>
+                  {matches
+                    .filter(m => selectedMatches.has(m.id))
+                    .slice(0, 6)
+                    .map(match => (
+                      <Text key={match.id} color={theme.textMuted}>
+                        {match.awayTeam.abbreviation}@{match.homeTeam.abbreviation}
+                      </Text>
+                    ))}
+                  {selectedMatches.size > 6 && (
+                    <Text color={theme.textDim}>+{selectedMatches.size - 6} more</Text>
+                  )}
+                </Box>
+                
+                {/* Actions */}
+                <Box marginTop={1} flexDirection="column">
+                  {!isBatchDownloading ? (
+                    <>
+                      <Text color={theme.success}>D = download all</Text>
+                      <Text color={theme.textDim}>c = clear selection</Text>
+                    </>
+                  ) : (
+                    <>
+                      <Box>
+                        <Text color={theme.warning}><Spinner type="dots" /> </Text>
+                        <Text color={theme.warning}>Downloading...</Text>
+                      </Box>
+                      <Text color={theme.text}>
+                        {batchProgress.current}/{batchProgress.total}
+                      </Text>
+                      {batchProgress.currentMatchId && (
+                        <Text color={theme.textMuted}>
+                          {matches.find(m => m.id === batchProgress.currentMatchId)?.awayTeam.abbreviation}@
+                          {matches.find(m => m.id === batchProgress.currentMatchId)?.homeTeam.abbreviation}
+                        </Text>
+                      )}
+                    </>
+                  )}
+                </Box>
+              </>
+            )}
+          </Box>
+        )}
       </Box>
       
       {/* Notification */}
@@ -998,17 +1308,58 @@ export function OtherMatchesPage({ authData, onBack }: OtherMatchesPageProps) {
       >
         <Text color={theme.textDim}>
           {hasSearched && <><Text color={theme.textMuted}>Tab</Text> switch  </>}
-          <Text color={theme.textMuted}>j/k</Text> navigate  
-          <Text color={theme.textMuted}> Enter</Text> {focusArea === 'filters' ? 'search/select' : 'expand'}  
+          <Text color={theme.textMuted}>j/k</Text> nav  
+          <Text color={theme.textMuted}> Enter</Text> {focusArea === 'filters' ? 'search' : 'expand'}  
           {focusArea === 'results' && (
             <>
-              <Text color={theme.success}> d</Text> download  
-              <Text color={theme.textMuted}> v</Text> check  
+              <Text color={theme.primary}> Space</Text> select  
+              <Text color={theme.textMuted}>v</Text> check  
+              <Text color={theme.textMuted}>d</Text> dl-one  
+            </>
+          )}
+          {selectedMatches.size > 0 && (
+            <>
+              <Text color={theme.success}> D</Text>  dl-all({selectedMatches.size})  
+              <Text color={theme.textMuted}>c</Text> clear  
             </>
           )}
           <Text color={theme.textMuted}> Esc</Text> back
         </Text>
       </Box>
+      
+      {/* Download location display */}
+      <Box
+        borderStyle={borderStyle}
+        borderColor={theme.borderSubtle}
+        borderTop={true}
+        borderBottom={false}
+        borderLeft={false}
+        borderRight={false}
+        paddingX={1}
+        paddingTop={1}
+        marginTop={0}
+      >
+        <Text color={theme.textDim}>
+          <Text color={theme.textMuted}>Downloads: </Text>
+          <Text color={theme.accent}>{getDisplayPath()}</Text>
+          <Text color={theme.textMuted}> (press </Text>
+          <Text color={theme.primary}>p</Text>
+          <Text color={theme.textMuted}> to open)</Text>
+        </Text>
+      </Box>
+      
+      {/* Folder Prompt Modal */}
+      {showFolderPrompt && (
+        <FolderPrompt
+          teamAbbrev={filters.selectedTeam?.abbreviation || userTeamAbbr}
+          teamName={filters.selectedTeam?.name}
+          onConfirm={(folderName) => {
+            setShowFolderPrompt(false);
+            downloadSelectedMatches(folderName);
+          }}
+          onCancel={() => setShowFolderPrompt(false)}
+        />
+      )}
     </Box>
   );
 }

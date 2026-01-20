@@ -213,6 +213,36 @@ export interface VideoInfo {
 }
 
 /**
+ * DVW file availability information
+ */
+export interface DVWInfo {
+  available: boolean;
+  matchId: number;
+  filename: string;
+  checked: boolean;
+}
+
+/**
+ * Combined content availability for a match (DVW + Video)
+ */
+export interface ContentAvailability {
+  matchId: number;
+  dvw: DVWInfo;
+  video: VideoInfo;
+}
+
+/**
+ * Set data from match analysis
+ */
+export interface SetData {
+  setNumber?: number;
+  homeScore?: number;
+  awayScore?: number;
+  rallyCount?: number;
+  rallies?: unknown[];
+}
+
+/**
  * Match analysis response from /analysis/matches/{id}
  * Contains video URLs, DVW data, and detailed match events
  */
@@ -228,7 +258,7 @@ export interface MatchAnalysis {
   homeTeamId: number;
   awayTeamId: number;
   duration: number; // milliseconds
-  sets: unknown[]; // Complex nested structure, not needed for video
+  sets: SetData[];
 }
 
 // ============================================
@@ -237,6 +267,29 @@ export interface MatchAnalysis {
 
 /** CloudFront CDN base URL for video downloads */
 export const VIDEO_CDN_BASE_URL = 'https://d3ndfq4ip6ejf2.cloudfront.net';
+
+/** DVW generation endpoint base URL */
+export const DVW_GENERATE_URL = 'https://api.volleymetrics.hudl.com/dvw/dvws/generate';
+
+/**
+ * Generate a DVW filename for a match
+ * DVW files always start with & character
+ * Format: &YYYY-MM-DD {matchId} AWAY-HOME.dvw
+ */
+export function generateDVWFilename(match: MatchEvent): string {
+  const date = new Date(match.matchDate);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const dateStr = `${year}-${month}-${day}`;
+  
+  const away = match.awayTeam.abbreviation || match.awayTeam.name;
+  const home = match.homeTeam.abbreviation || match.homeTeam.name;
+  
+  // DVW files always start with &
+  // Format: &2025-11-08 712795 MSU-ARK.dvw
+  return `&${dateStr} ${match.id} ${away}-${home}.dvw`;
+}
 
 // ============================================
 // Legacy placeholder types (kept for compatibility)
@@ -314,6 +367,34 @@ export class HudlAPI {
     }
 
     return response.json() as Promise<T>;
+  }
+
+  /**
+   * Make authenticated API request and return raw response
+   */
+  private async requestRaw(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<Response> {
+    const url = `${API_BASE_URL}${endpoint}`;
+
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        ...DEFAULT_HEADERS,
+        'Authorization': `Bearer ${this.token}`,
+        ...options.headers,
+      },
+    });
+
+    if (!response.ok) {
+      throw new APIError(
+        `API request failed: ${response.status} ${response.statusText}`,
+        response.status
+      );
+    }
+
+    return response;
   }
 
   /**
@@ -464,6 +545,9 @@ export class HudlAPI {
     });
     
     const endpoint = `/portal/events/other?${searchParams.toString()}`;
+    console.log(`[API] getOtherMatches URL: ${API_BASE_URL}${endpoint}`);
+    console.log(`[API] getOtherMatches teamId param: ${params.teamId}`);
+    
     return this.request<MatchesResponse>(endpoint);
   }
 
@@ -693,7 +777,7 @@ export class HudlAPI {
 
   /**
    * Get DVW files for a team
-   * TODO: Discover actual endpoint
+   * @deprecated Use checkDVWAvailability() with matches instead
    */
   async getDVWFiles(teamId: number): Promise<DVWFile[]> {
     console.log(`[API] getDVWFiles called for team ${teamId}`);
@@ -708,12 +792,187 @@ export class HudlAPI {
     throw new Error('Use constructVideoUrl() instead');
   }
 
+  // ============================================
+  // DVW FILE METHODS
+  // ============================================
+
   /**
-   * Get download URL for a DVW file
-   * TODO: Discover actual endpoint
+   * Get the DVW download URL for a match
+   * Uses the generate endpoint which returns the DVW file content
+   * 
+   * @param matchId The portal match ID
+   * @returns URL for DVW file generation/download
    */
-  async getDVWDownloadUrl(_dvwId: string): Promise<string> {
-    throw new Error('DVW download endpoint not yet discovered');
+  getDVWDownloadUrl(matchId: number): string {
+    return `${DVW_GENERATE_URL}?portalMatchId=${matchId}`;
+  }
+
+/**
+ * Check DVW availability for a match
+ * Uses the analysis API response length to determine if there's enough data
+ * 
+ * NOTE: DVW can be generated if the analysis response has substantial data.
+ * Matches without stats have minimal response (~500 chars or less).
+ * 
+ * @param match Match event data
+ * @returns DVWInfo with availability status
+ */
+async checkDVWAvailability(match: MatchEvent): Promise<DVWInfo> {
+  try {
+    const response = await this.requestRaw(`/analysis/matches/${match.id}`);
+    const responseText = await response.text();
+    
+    // DVW is available if the analysis response has substantial data
+    // Empty/minimal responses are typically < 1000 chars
+    const MIN_ANALYSIS_LENGTH = 1000;
+    const available = responseText.length > MIN_ANALYSIS_LENGTH;
+    
+    console.log(`[API] DVW check for match ${match.id}: ${responseText.length} chars, available: ${available}`);
+    
+    return {
+      available,
+      matchId: match.id,
+      filename: generateDVWFilename(match),
+      checked: true,
+    };
+  } catch {
+    // API call failed - assume DVW not available
+    return {
+      available: false,
+      matchId: match.id,
+      filename: generateDVWFilename(match),
+      checked: true,
+    };
+  }
+}
+
+/**
+ * Check both DVW and Video availability for a match
+ * Useful for DVW browser to show both statuses
+ * 
+ * NOTE: DVW availability is determined by analysis response length (> 1000 chars)
+ * 
+ * @param match Match event data
+ * @returns ContentAvailability with both DVW and video info
+ */
+async checkContentAvailability(match: MatchEvent): Promise<ContentAvailability> {
+  try {
+    const response = await this.requestRaw(`/analysis/matches/${match.id}`);
+    const responseText = await response.text();
+    const analysis = JSON.parse(responseText) as MatchAnalysis;
+    
+    // DVW is available if the analysis response has substantial data
+    const MIN_ANALYSIS_LENGTH = 1000;
+    const dvwAvailable = responseText.length > MIN_ANALYSIS_LENGTH;
+    
+    console.log(`[API] Content check for match ${match.id}: ${responseText.length} chars, DVW: ${dvwAvailable}`);
+    
+    const dvw: DVWInfo = {
+      available: dvwAvailable,
+      matchId: match.id,
+      filename: generateDVWFilename(match),
+      checked: true,
+    };
+      
+    // Check Video availability
+    let videoAvailable = false;
+    let videoUrl = '';
+    let videoFilename = '';
+    
+    if (analysis.encodedVideoUrl) {
+      videoFilename = analysis.encodedVideoUrl.split('/').pop() || '';
+      videoUrl = `${VIDEO_CDN_BASE_URL}/${videoFilename}`;
+      videoAvailable = true;
+    }
+    
+    const video: VideoInfo = {
+      available: videoAvailable,
+      url: videoUrl,
+      filename: videoFilename,
+      matchId: match.id,
+      checked: true,
+    };
+      
+      return { matchId: match.id, dvw, video };
+    } catch {
+      // Return both as unavailable on error
+      return {
+        matchId: match.id,
+        dvw: {
+          available: false,
+          matchId: match.id,
+          filename: generateDVWFilename(match),
+          checked: true,
+        },
+        video: {
+          available: false,
+          url: '',
+          filename: '',
+          matchId: match.id,
+          checked: true,
+        },
+      };
+    }
+  }
+
+  /**
+   * Download DVW file content from the generate endpoint
+   * Returns the raw DVW text content
+   * 
+   * NOTE: This endpoint requires a POST request with an empty body
+   * 
+   * @param matchId The portal match ID
+   * @returns DVW file content as string, or null if unavailable
+   */
+  async downloadDVWContent(matchId: number): Promise<string | null> {
+    const url = this.getDVWDownloadUrl(matchId);
+    
+    console.log(`[API] DVW POST request to: ${url}`);
+    
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`,
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json;charset=utf-8',
+          'Origin': 'https://portal.volleymetrics.hudl.com',
+          'Referer': 'https://portal.volleymetrics.hudl.com/',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: '', // Empty body for POST request
+      });
+      
+      console.log(`[API] DVW response status: ${response.status} ${response.statusText}`);
+      console.log(`[API] DVW response headers:`, Object.fromEntries(response.headers.entries()));
+      
+      if (!response.ok) {
+        console.error(`[API] DVW download failed: ${response.status} ${response.statusText} for matchId ${matchId}`);
+        return null;
+      }
+      
+      const content = await response.text();
+      console.log(`[API] DVW content length: ${content.length}, starts with: "${content.substring(0, 50)}"`);
+      
+      // Trim any leading whitespace/BOM and check for DVW format
+      const trimmedContent = content.trimStart();
+      
+      // DVW files should contain "[3DATAVOLLEY" somewhere near the start
+      // or start with & character
+      const isDVWFormat = trimmedContent.startsWith('&') || 
+                          trimmedContent.includes('[3DATAVOLLEY') ||
+                          content.length > 100; // If we got substantial content, it's probably valid
+      
+      if (!isDVWFormat || content.length < 50) {
+        console.warn(`[API] DVW content appears invalid for matchId ${matchId}. Length: ${content.length}, Preview: ${content.substring(0, 100)}`);
+        return null;
+      }
+      
+      // Return content as-is (it should start with & for proper DVW format)
+      return content;
+    } catch {
+      return null;
+    }
   }
 }
 

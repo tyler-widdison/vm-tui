@@ -1,7 +1,8 @@
 /**
- * ContentBrowser - Video content browser with monthly grouping
+ * TeamDVWBrowser - DVW file browser with monthly grouping
  * Displays matches organized by month with collapsible sections
- * Supports video downloads with progress tracking
+ * Shows both DVW and Video availability for each match
+ * Supports DVW downloads with progress tracking
  */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
@@ -10,22 +11,24 @@ import Spinner from 'ink-spinner';
 import { theme, borderStyle } from '../theme.js';
 import {
   HudlAPI,
-  getCurrentSeasonRange,
   groupMatchesByMonth,
   getSortedMonthKeys,
   formatMatchDate,
   formatMatchTime,
   downloadManager,
   formatBytes,
-  generateVideoFilename,
-  getDownloadedMatches,
+  getDownloadedDVWs,
+  getDownloadedVideos,
   getDisplayPath,
   openDownloadDir,
   getStoredUser,
+  generateDVWFilename,
   type DownloadOptions,
   type HudlAuthData,
   type MatchEvent,
+  type DVWInfo,
   type VideoInfo,
+  type ContentAvailability,
   type DownloadProgress,
   type DownloadRecord,
 } from '../lib/index.js';
@@ -36,7 +39,7 @@ import { FolderPrompt } from './FolderPrompt.js';
 // Types
 // ============================================
 
-interface ContentBrowserProps {
+interface TeamDVWBrowserProps {
   authData: HudlAuthData;
   onBack: () => void;
 }
@@ -53,15 +56,18 @@ interface Account {
   };
 }
 
-type VideoStatus = 'unknown' | 'checking' | 'available' | 'unavailable';
+type ContentStatus = 'unknown' | 'checking' | 'available' | 'unavailable';
 type DownloadStatus = 'none' | 'downloading' | 'completed' | 'error' | 'previously_downloaded';
 
-interface MatchWithVideo extends MatchEvent {
-  videoStatus: VideoStatus;
+interface MatchWithContent extends MatchEvent {
+  dvwStatus: ContentStatus;
+  dvwInfo?: DVWInfo;
+  videoStatus: ContentStatus;
   videoInfo?: VideoInfo;
-  downloadStatus: DownloadStatus;
-  downloadProgress?: DownloadProgress;
-  downloadRecord?: DownloadRecord; // For previously downloaded files
+  dvwDownloadStatus: DownloadStatus;
+  dvwDownloadProgress?: DownloadProgress;
+  dvwDownloadRecord?: DownloadRecord;
+  videoDownloadRecord?: DownloadRecord; // For showing video download status
 }
 
 interface BatchProgress {
@@ -115,20 +121,21 @@ function getSeasonDateRange(startYear: number): { startDate: string; endDate: st
 // Component
 // ============================================
 
-export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
+export function TeamDVWBrowser({ authData, onBack }: TeamDVWBrowserProps) {
   // Season options
   const seasonOptions = useMemo(() => getSeasonOptions(), []);
   
   // State
   const [selectedSeasonIndex, setSelectedSeasonIndex] = useState(0); // 0 = current season
-  const [matches, setMatches] = useState<MatchWithVideo[]>([]);
+  const [matches, setMatches] = useState<MatchWithContent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [focusedIndex, setFocusedIndex] = useState(0);
-  const [videoCache] = useState<Map<number, VideoInfo>>(new Map());
+  const [contentCache] = useState<Map<number, ContentAvailability>>(new Map());
   const [notification, setNotification] = useState<string | null>(null);
-  const [downloadedCache, setDownloadedCache] = useState<Map<number, DownloadRecord>>(new Map());
+  const [dvwDownloadedCache, setDvwDownloadedCache] = useState<Map<number, DownloadRecord>>(new Map());
+  const [videoDownloadedCache, setVideoDownloadedCache] = useState<Map<number, DownloadRecord>>(new Map());
   
   // Selection state for batch downloads
   const [selectedMatches, setSelectedMatches] = useState<Set<number>>(new Set());
@@ -137,10 +144,8 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
   
   // Folder prompt state
   const [showFolderPrompt, setShowFolderPrompt] = useState(false);
-  const [customFolder, setCustomFolder] = useState<string | null>(null);
   
   // User accounts state
-  const [accounts, setAccounts] = useState<Account[]>([]);
   const [userTeamAbbr, setUserTeamAbbr] = useState<string>('');
   
   // Get current season
@@ -161,7 +166,7 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
   
   // Build flat list for navigation (sections + matches)
   const flatList = useMemo(() => {
-    const items: Array<{ type: 'section'; key: string } | { type: 'match'; match: MatchWithVideo; monthKey: string }> = [];
+    const items: Array<{ type: 'section'; key: string } | { type: 'match'; match: MatchWithContent; monthKey: string }> = [];
     
     for (const monthKey of monthKeys) {
       items.push({ type: 'section', key: monthKey });
@@ -169,7 +174,7 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
       if (expandedSections.has(monthKey)) {
         const monthMatches = groupedMatches.get(monthKey) || [];
         for (const match of monthMatches) {
-          items.push({ type: 'match', match: match as MatchWithVideo, monthKey });
+          items.push({ type: 'match', match: match as MatchWithContent, monthKey });
         }
       }
     }
@@ -189,7 +194,6 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
         const user = await getStoredUser();
         if (user) {
           const accountsResponse = await api.getAccounts();
-          setAccounts(accountsResponse.accounts);
           
           const activeAccount = accountsResponse.accounts.find(acc => acc.teamId === user.teamId);
           if (activeAccount) {
@@ -203,25 +207,28 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
     loadAccounts();
   }, [api]);
   
-  // Load downloaded matches on mount and update match status
+  // Load downloaded DVW and video records on mount
   useEffect(() => {
     async function loadDownloadedStatus() {
       try {
-        const downloaded = await getDownloadedMatches();
-        setDownloadedCache(downloaded);
+        const [dvwDownloaded, videoDownloaded] = await Promise.all([
+          getDownloadedDVWs(),
+          getDownloadedVideos(),
+        ]);
+        setDvwDownloadedCache(dvwDownloaded);
+        setVideoDownloadedCache(videoDownloaded);
         
         // Update matches with previously downloaded status
-        if (downloaded.size > 0) {
+        if (dvwDownloaded.size > 0 || videoDownloaded.size > 0) {
           setMatches(prev => prev.map(m => {
-            const record = downloaded.get(m.id);
-            if (record) {
-              return {
-                ...m,
-                downloadStatus: 'previously_downloaded' as DownloadStatus,
-                downloadRecord: record,
-              };
-            }
-            return m;
+            const dvwRecord = dvwDownloaded.get(m.id);
+            const videoRecord = videoDownloaded.get(m.id);
+            return {
+              ...m,
+              dvwDownloadStatus: dvwRecord ? 'previously_downloaded' as DownloadStatus : m.dvwDownloadStatus,
+              dvwDownloadRecord: dvwRecord,
+              videoDownloadRecord: videoRecord,
+            };
           }));
         }
       } catch (err) {
@@ -234,27 +241,30 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
   
   // Update download status when matches change (after initial load)
   useEffect(() => {
-    if (matches.length > 0 && downloadedCache.size > 0) {
-      // Check if any matches need their download status updated
+    if (matches.length > 0 && (dvwDownloadedCache.size > 0 || videoDownloadedCache.size > 0)) {
       const needsUpdate = matches.some(m => 
-        downloadedCache.has(m.id) && m.downloadStatus === 'none'
+        (dvwDownloadedCache.has(m.id) && m.dvwDownloadStatus === 'none') ||
+        (videoDownloadedCache.has(m.id) && !m.videoDownloadRecord)
       );
       
       if (needsUpdate) {
         setMatches(prev => prev.map(m => {
-          const record = downloadedCache.get(m.id);
-          if (record && m.downloadStatus === 'none') {
+          const dvwRecord = dvwDownloadedCache.get(m.id);
+          const videoRecord = videoDownloadedCache.get(m.id);
+          
+          if ((dvwRecord && m.dvwDownloadStatus === 'none') || (videoRecord && !m.videoDownloadRecord)) {
             return {
               ...m,
-              downloadStatus: 'previously_downloaded' as DownloadStatus,
-              downloadRecord: record,
+              dvwDownloadStatus: dvwRecord ? 'previously_downloaded' as DownloadStatus : m.dvwDownloadStatus,
+              dvwDownloadRecord: dvwRecord || m.dvwDownloadRecord,
+              videoDownloadRecord: videoRecord || m.videoDownloadRecord,
             };
           }
           return m;
         }));
       }
     }
-  }, [matches.length, downloadedCache]);
+  }, [matches.length, dvwDownloadedCache, videoDownloadedCache]);
   
   // Auto-expand first section with matches
   useEffect(() => {
@@ -263,57 +273,70 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
     }
   }, [monthKeys]);
   
-  // Lazy load video info for visible matches
+  // Lazy load content availability for visible matches
   useEffect(() => {
     if (flatList.length === 0) return;
     
-    // Check videos for matches near the focused item
+    // Check content for matches near the focused item
     const PREFETCH_RANGE = 5;
     const startIdx = Math.max(0, focusedIndex - PREFETCH_RANGE);
     const endIdx = Math.min(flatList.length - 1, focusedIndex + PREFETCH_RANGE);
     
     for (let i = startIdx; i <= endIdx; i++) {
       const item = flatList[i];
-      if (item?.type === 'match' && item.match.videoStatus === 'unknown') {
-        // Inline the check logic here to avoid dependency issues
+      if (item?.type === 'match' && item.match.dvwStatus === 'unknown') {
         const match = item.match;
-        if (videoCache.has(match.id)) {
-          const cached = videoCache.get(match.id)!;
+        if (contentCache.has(match.id)) {
+          const cached = contentCache.get(match.id)!;
           setMatches(prev => prev.map(m => 
             m.id === match.id 
-              ? { ...m, videoStatus: cached.available ? 'available' : 'unavailable', videoInfo: cached }
+              ? { 
+                  ...m, 
+                  dvwStatus: cached.dvw.available ? 'available' : 'unavailable',
+                  dvwInfo: cached.dvw,
+                  videoStatus: cached.video.available ? 'available' : 'unavailable',
+                  videoInfo: cached.video,
+                }
               : m
           ));
         } else {
           // Mark as checking and fetch
           setMatches(prev => prev.map(m => 
-            m.id === match.id ? { ...m, videoStatus: 'checking' as VideoStatus } : m
+            m.id === match.id ? { ...m, dvwStatus: 'checking' as ContentStatus, videoStatus: 'checking' as ContentStatus } : m
           ));
           
-          api.findVideoUrl(match).then(videoInfo => {
-            videoCache.set(match.id, videoInfo);
+          api.checkContentAvailability(match).then(availability => {
+            contentCache.set(match.id, availability);
             setMatches(prev => prev.map(m => 
               m.id === match.id 
-                ? { ...m, videoStatus: videoInfo.available ? 'available' : 'unavailable', videoInfo }
+                ? { 
+                    ...m, 
+                    dvwStatus: availability.dvw.available ? 'available' : 'unavailable',
+                    dvwInfo: availability.dvw,
+                    videoStatus: availability.video.available ? 'available' : 'unavailable',
+                    videoInfo: availability.video,
+                  }
                 : m
             ));
           }).catch(() => {
             setMatches(prev => prev.map(m => 
-              m.id === match.id ? { ...m, videoStatus: 'unavailable' as VideoStatus } : m
+              m.id === match.id 
+                ? { ...m, dvwStatus: 'unavailable' as ContentStatus, videoStatus: 'unavailable' as ContentStatus } 
+                : m
             ));
           });
         }
       }
     }
-  }, [focusedIndex, flatList, api, videoCache]);
+  }, [focusedIndex, flatList, api, contentCache]);
   
   // Load matches from API
   const loadMatches = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setMatches([]); // Clear existing matches
-    setExpandedSections(new Set()); // Reset expanded sections
-    setFocusedIndex(0); // Reset focus
+    setMatches([]);
+    setExpandedSections(new Set());
+    setFocusedIndex(0);
     
     try {
       const dateRange = getSeasonDateRange(currentSeason.startYear);
@@ -323,14 +346,15 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
         size: 50,
       });
       
-      // Convert to MatchWithVideo with unknown video status
-      const matchesWithVideo: MatchWithVideo[] = response.content.map(match => ({
+      // Convert to MatchWithContent with unknown status
+      const matchesWithContent: MatchWithContent[] = response.content.map(match => ({
         ...match,
-        videoStatus: 'unknown' as VideoStatus,
-        downloadStatus: 'none' as DownloadStatus,
+        dvwStatus: 'unknown' as ContentStatus,
+        videoStatus: 'unknown' as ContentStatus,
+        dvwDownloadStatus: 'none' as DownloadStatus,
       }));
       
-      setMatches(matchesWithVideo);
+      setMatches(matchesWithContent);
       
       // Load more pages if needed
       if (!response.last) {
@@ -361,8 +385,9 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
           ...prev,
           ...response.content.map(match => ({
             ...match,
-            videoStatus: 'unknown' as VideoStatus,
-            downloadStatus: 'none' as DownloadStatus,
+            dvwStatus: 'unknown' as ContentStatus,
+            videoStatus: 'unknown' as ContentStatus,
+            dvwDownloadStatus: 'none' as DownloadStatus,
           })),
         ]);
       } catch (err) {
@@ -371,45 +396,54 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
     }
   }, [api]);
   
-  // Check video availability for a match
-  const checkVideoForMatch = useCallback(async (match: MatchWithVideo, forceRecheck: boolean = false) => {
-    // Skip if already checking (unless force recheck)
-    if (!forceRecheck && match.videoStatus === 'checking') return;
+  // Check content availability for a match
+  const checkContentForMatch = useCallback(async (match: MatchWithContent, forceRecheck: boolean = false) => {
+    if (!forceRecheck && match.dvwStatus === 'checking') return;
+    if (!forceRecheck && match.dvwStatus !== 'unknown') return;
     
-    // Skip if already checked (unless force recheck)
-    if (!forceRecheck && match.videoStatus !== 'unknown') return;
-    
-    // Use cache if available and not forcing recheck
-    if (!forceRecheck && videoCache.has(match.id)) {
-      const cached = videoCache.get(match.id)!;
+    if (!forceRecheck && contentCache.has(match.id)) {
+      const cached = contentCache.get(match.id)!;
       setMatches(prev => prev.map(m => 
         m.id === match.id 
-          ? { ...m, videoStatus: cached.available ? 'available' : 'unavailable', videoInfo: cached }
+          ? { 
+              ...m, 
+              dvwStatus: cached.dvw.available ? 'available' : 'unavailable',
+              dvwInfo: cached.dvw,
+              videoStatus: cached.video.available ? 'available' : 'unavailable',
+              videoInfo: cached.video,
+            }
           : m
       ));
       return;
     }
     
-    // Mark as checking
     setMatches(prev => prev.map(m => 
-      m.id === match.id ? { ...m, videoStatus: 'checking' as VideoStatus } : m
+      m.id === match.id ? { ...m, dvwStatus: 'checking' as ContentStatus, videoStatus: 'checking' as ContentStatus } : m
     ));
     
     try {
-      const videoInfo = await api.findVideoUrl(match);
-      videoCache.set(match.id, videoInfo);
+      const availability = await api.checkContentAvailability(match);
+      contentCache.set(match.id, availability);
       
       setMatches(prev => prev.map(m => 
         m.id === match.id 
-          ? { ...m, videoStatus: videoInfo.available ? 'available' : 'unavailable', videoInfo }
+          ? { 
+              ...m, 
+              dvwStatus: availability.dvw.available ? 'available' : 'unavailable',
+              dvwInfo: availability.dvw,
+              videoStatus: availability.video.available ? 'available' : 'unavailable',
+              videoInfo: availability.video,
+            }
           : m
       ));
     } catch {
       setMatches(prev => prev.map(m => 
-        m.id === match.id ? { ...m, videoStatus: 'unavailable' as VideoStatus } : m
+        m.id === match.id 
+          ? { ...m, dvwStatus: 'unavailable' as ContentStatus, videoStatus: 'unavailable' as ContentStatus } 
+          : m
       ));
     }
-  }, [api, videoCache]);
+  }, [api, contentCache]);
   
   // Toggle section expansion
   const toggleSection = useCallback((key: string) => {
@@ -424,52 +458,48 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
     });
   }, []);
   
-  // Download video for a match using global download manager
-  const downloadMatchVideo = useCallback(async (match: MatchWithVideo) => {
-    // Skip if video not available or already downloading
-    if (match.videoStatus !== 'available' || !match.videoInfo) {
+  // Download DVW for a match
+  const downloadMatchDVW = useCallback(async (match: MatchWithContent) => {
+    if (match.dvwStatus !== 'available' || !match.dvwInfo) {
       return;
     }
-    if (match.downloadStatus === 'downloading' || downloadManager.isDownloading(match.id)) {
+    if (match.dvwDownloadStatus === 'downloading' || downloadManager.isDownloadingContent(match.id, 'dvw')) {
       return;
     }
     
-    // Mark as downloading locally (will be updated by manager)
     setMatches(prev => prev.map(m => 
-      m.id === match.id ? { ...m, downloadStatus: 'downloading' as DownloadStatus } : m
+      m.id === match.id ? { ...m, dvwDownloadStatus: 'downloading' as DownloadStatus } : m
     ));
     
-    // Use global download manager
-    const result = await downloadManager.startDownload(match, match.videoInfo);
+    const result = await downloadManager.startDVWDownload(match, match.dvwInfo, authData);
     
     if (result.success && result.filepath) {
-      // Update local state
-      const filename = generateVideoFilename(match);
+      const filename = match.dvwInfo.filename;
       const newRecord: DownloadRecord = {
         matchId: match.id,
         filepath: result.filepath,
         filename,
         downloadedAt: new Date().toISOString(),
-        contentType: 'video',
+        contentType: 'dvw',
       };
-      setDownloadedCache(prev => new Map(prev).set(match.id, newRecord));
+      setDvwDownloadedCache(prev => new Map(prev).set(match.id, newRecord));
       
       setMatches(prev => prev.map(m => 
         m.id === match.id 
-          ? { ...m, downloadStatus: 'completed' as DownloadStatus, downloadRecord: newRecord }
+          ? { ...m, dvwDownloadStatus: 'completed' as DownloadStatus, dvwDownloadRecord: newRecord }
           : m
       ));
     } else {
       setMatches(prev => prev.map(m => 
         m.id === match.id 
-          ? { ...m, downloadStatus: 'error' as DownloadStatus }
+          ? { ...m, dvwDownloadStatus: 'error' as DownloadStatus }
           : m
       ));
     }
-  }, []);
+  }, [authData]);
   
-  // Batch download selected matches
-  const downloadSelectedMatches = useCallback(async (customFolder: string | null = null) => {
+  // Batch download selected DVW files
+  const downloadSelectedDVWs = useCallback(async (customFolder: string | null = null) => {
     if (selectedMatches.size === 0 || isBatchDownloading) return;
     
     setIsBatchDownloading(true);
@@ -490,79 +520,91 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
       downloadManager.setBatchProgress(progress);
       
       // Skip if already downloaded
-      if (match.downloadStatus === 'previously_downloaded' || 
-          match.downloadStatus === 'completed') {
+      if (match.dvwDownloadStatus === 'previously_downloaded' || 
+          match.dvwDownloadStatus === 'completed') {
+        console.log(`[DVW Batch] Skipping match ${match.id}: already downloaded`);
         skipCount++;
         continue;
       }
       
       // Skip future matches
       if (isMatchInFuture(match.matchDate)) {
+        console.log(`[DVW Batch] Skipping match ${match.id}: future match`);
         skipCount++;
         continue;
       }
       
-      // Check video availability first (sequential)
+      // Check content availability first
       setMatches(prev => prev.map(m => 
-        m.id === match.id ? { ...m, videoStatus: 'checking' as VideoStatus } : m
+        m.id === match.id ? { ...m, dvwStatus: 'checking' as ContentStatus } : m
       ));
       
       try {
-        let videoInfo = match.videoInfo;
+        let dvwInfo = match.dvwInfo;
         
-        // If no video info cached, fetch it
-        if (!videoInfo || !match.videoInfo?.checked) {
-          videoInfo = await api.findVideoUrl(match);
-          videoCache.set(match.id, videoInfo);
+        // If no DVW info cached, fetch it
+        if (!dvwInfo || !match.dvwInfo?.checked) {
+          console.log(`[DVW Batch] Checking availability for match ${match.id}...`);
+          const availability = await api.checkContentAvailability(match);
+          contentCache.set(match.id, availability);
+          dvwInfo = availability.dvw;
+          console.log(`[DVW Batch] Match ${match.id} DVW available: ${availability.dvw.available}`);
+          
+          setMatches(prev => prev.map(m => 
+            m.id === match.id 
+              ? { 
+                  ...m, 
+                  dvwStatus: availability.dvw.available ? 'available' : 'unavailable',
+                  dvwInfo: availability.dvw,
+                  videoStatus: availability.video.available ? 'available' : 'unavailable',
+                  videoInfo: availability.video,
+                }
+              : m
+          ));
         }
         
-        // Update video status
-        setMatches(prev => prev.map(m => 
-          m.id === match.id 
-            ? { ...m, videoStatus: videoInfo!.available ? 'available' : 'unavailable', videoInfo }
-            : m
-        ));
-        
         // If available, download it
-        if (videoInfo.available) {
+        if (dvwInfo.available) {
+          console.log(`[DVW Batch] Starting download for match ${match.id}...`);
           setMatches(prev => prev.map(m => 
-            m.id === match.id ? { ...m, downloadStatus: 'downloading' as DownloadStatus } : m
+            m.id === match.id ? { ...m, dvwDownloadStatus: 'downloading' as DownloadStatus } : m
           ));
           
-          const result = await downloadManager.startDownload(match, videoInfo, downloadOptions);
+          const result = await downloadManager.startDVWDownload(match, dvwInfo, authData, downloadOptions);
           
           if (result.success && result.filepath) {
             successCount++;
-            const filename = generateVideoFilename(match);
+            const filename = dvwInfo.filename;
             const newRecord: DownloadRecord = {
               matchId: match.id,
               filepath: result.filepath,
               filename,
               downloadedAt: new Date().toISOString(),
-              contentType: 'video',
+              contentType: 'dvw',
             };
-            setDownloadedCache(prev => new Map(prev).set(match.id, newRecord));
+            setDvwDownloadedCache(prev => new Map(prev).set(match.id, newRecord));
             
             setMatches(prev => prev.map(m => 
               m.id === match.id 
-                ? { ...m, downloadStatus: 'completed' as DownloadStatus, downloadRecord: newRecord }
+                ? { ...m, dvwDownloadStatus: 'completed' as DownloadStatus, dvwDownloadRecord: newRecord }
                 : m
             ));
           } else {
             errorCount++;
             setMatches(prev => prev.map(m => 
-              m.id === match.id ? { ...m, downloadStatus: 'error' as DownloadStatus } : m
+              m.id === match.id ? { ...m, dvwDownloadStatus: 'error' as DownloadStatus } : m
             ));
           }
         } else {
-          // Video not available, skip it
+          // DVW not available, skip it
+          console.log(`[DVW Batch] Skipping match ${match.id}: DVW not available`);
           skipCount++;
         }
         
       } catch (err) {
         errorCount++;
         setMatches(prev => prev.map(m => 
-          m.id === match.id ? { ...m, videoStatus: 'unavailable' as VideoStatus } : m
+          m.id === match.id ? { ...m, dvwStatus: 'unavailable' as ContentStatus } : m
         ));
       }
     }
@@ -581,7 +623,7 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
     setNotification(`Batch complete: ${parts.join(', ')}`);
     setTimeout(() => setNotification(null), 5000);
     
-  }, [selectedMatches, matches, isBatchDownloading, api, videoCache]);
+  }, [selectedMatches, matches, isBatchDownloading, api, contentCache, authData]);
   
   // Keyboard input handler
   useInput((input, key) => {
@@ -620,9 +662,8 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
         if (item?.type === 'match') {
           const match = item.match;
           const isFuture = isMatchInFuture(match.matchDate);
-          const isDownloading = match.downloadStatus === 'downloading';
+          const isDownloading = match.dvwDownloadStatus === 'downloading';
           
-          // Don't allow selecting future matches or currently downloading
           if (!isFuture && !isDownloading && !isBatchDownloading) {
             setSelectedMatches(prev => {
               const next = new Set(prev);
@@ -635,10 +676,10 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
             });
             
             // Show notification if already downloaded
-            const alreadyDownloaded = match.downloadStatus === 'previously_downloaded' || 
-                                       match.downloadStatus === 'completed';
+            const alreadyDownloaded = match.dvwDownloadStatus === 'previously_downloaded' || 
+                                       match.dvwDownloadStatus === 'completed';
             if (alreadyDownloaded && !selectedMatches.has(match.id)) {
-              setNotification('Already downloaded - will skip in batch');
+              setNotification('DVW already downloaded - will skip in batch');
               setTimeout(() => setNotification(null), 2000);
             }
           } else if (isFuture) {
@@ -649,11 +690,11 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
         return;
       }
       
-      // Download single video (lowercase d)
+      // Download single DVW (lowercase d)
       if (input === 'd' && !isBatchDownloading) {
         const item = flatList[focusedIndex];
         if (item?.type === 'match') {
-          downloadMatchVideo(item.match);
+          downloadMatchDVW(item.match);
         }
       }
       
@@ -664,13 +705,12 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
         setTimeout(() => setNotification(null), 1500);
       }
       
-      // Manual video check
+      // Manual content check
       if (input === 'v') {
         const item = flatList[focusedIndex];
         if (item?.type === 'match') {
-          // Clear cache and force recheck
-          videoCache.delete(item.match.id);
-          checkVideoForMatch(item.match, true);
+          contentCache.delete(item.match.id);
+          checkContentForMatch(item.match, true);
         }
       }
       
@@ -693,7 +733,7 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
       });
     }
     
-    // Back (downloads continue in background)
+    // Back
     if (key.escape || input === 'q') {
       onBack();
     }
@@ -748,7 +788,7 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
         justifyContent="space-between"
       >
         <Box>
-          <Text color={theme.primary} bold>Videos</Text>
+          <Text color={theme.primary} bold>DVW Files</Text>
           <Text color={theme.textDim}> - </Text>
           <Text color={theme.text}>{matches.length} matches</Text>
           {loading && (
@@ -763,6 +803,19 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
           <Text color={theme.accent} bold>{currentSeason.label}</Text>
           {selectedSeasonIndex < seasonOptions.length - 1 && <Text color={theme.textDim}> {'>'}</Text>}
         </Box>
+      </Box>
+      
+      {/* Legend for dual status */}
+      <Box paddingX={1} marginBottom={1}>
+        <Text color={theme.textMuted}>Status: </Text>
+        <Text color={theme.textDim}>[DVW]</Text>
+        <Text color={theme.textDim}>[Video] </Text>
+        <Text color={theme.success}>D</Text>
+        <Text color={theme.textMuted}>=available </Text>
+        <Text color={theme.error}>X</Text>
+        <Text color={theme.textMuted}>=unavailable </Text>
+        <Text color={theme.primary}>*</Text>
+        <Text color={theme.textMuted}>=downloaded</Text>
       </Box>
       
       {/* Content list */}
@@ -786,7 +839,7 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
           }
           
           return (
-            <MatchItem
+            <DVWMatchItem
               key={`match-${item.match.id}-${index}`}
               match={item.match}
               isFocused={isFocused}
@@ -810,7 +863,7 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
             <Text color={theme.accent} bold>Selection: </Text>
             <Box>
               <Text color={theme.primary} bold>{selectedMatches.size}</Text>
-              <Text color={theme.text}> video{selectedMatches.size !== 1 ? 's' : ''} selected</Text>
+              <Text color={theme.text}> DVW file{selectedMatches.size !== 1 ? 's' : ''} selected</Text>
             </Box>
             {!isBatchDownloading ? (
               <Box marginTop={1}>
@@ -897,10 +950,10 @@ export function ContentBrowser({ authData, onBack }: ContentBrowserProps) {
       {showFolderPrompt && (
         <FolderPrompt
           teamAbbrev={userTeamAbbr}
-          teamName={`MyTeam-${currentSeason.label}`}
+          teamName={`DVW-${userTeamAbbr}-${currentSeason.label}`}
           onConfirm={(folderName) => {
             setShowFolderPrompt(false);
-            downloadSelectedMatches(folderName);
+            downloadSelectedDVWs(folderName);
           }}
           onCancel={() => setShowFolderPrompt(false)}
         />
@@ -921,7 +974,6 @@ interface SectionHeaderProps {
 }
 
 function SectionHeader({ title, count, isExpanded, isFocused }: SectionHeaderProps) {
-  const arrow = isExpanded ? '>' : '>';
   const bgColor = isFocused ? theme.backgroundElement : undefined;
   const textColor = isFocused ? theme.primary : theme.text;
   
@@ -937,71 +989,92 @@ function SectionHeader({ title, count, isExpanded, isFocused }: SectionHeaderPro
   );
 }
 
-interface MatchItemProps {
-  match: MatchWithVideo;
+interface DVWMatchItemProps {
+  match: MatchWithContent;
   isFocused: boolean;
   isSelected: boolean;
 }
 
-function MatchItem({ match, isFocused, isSelected }: MatchItemProps) {
+function DVWMatchItem({ match, isFocused, isSelected }: DVWMatchItemProps) {
   const bgColor = isFocused ? theme.backgroundElement : undefined;
   const isFutureMatch = isMatchInFuture(match.matchDate);
-  const canSelect = !isFutureMatch && match.downloadStatus !== 'downloading';
+  const canSelect = !isFutureMatch && match.dvwDownloadStatus !== 'downloading';
   const checkboxChar = isSelected ? 'x' : ' ';
   const checkboxColor = !canSelect ? theme.textDim : isSelected ? theme.success : theme.textMuted;
   
-  // Video/download status indicator
-  let statusIndicator: React.ReactNode;
-  let statusColor: string;
-  let statusText: string | null = null;
+  // DVW status indicator
+  let dvwIndicator: React.ReactNode;
+  let dvwColor: string;
   
-  // Download status takes precedence over video status
-  if (match.downloadStatus === 'downloading') {
-    statusIndicator = <Spinner type="dots" />;
-    statusColor = theme.warning;
-    if (match.downloadProgress) {
-      const { percent, bytesDownloaded, totalBytes } = match.downloadProgress;
-      if (totalBytes > 0) {
-        statusText = ` ${percent}% (${formatBytes(bytesDownloaded)}/${formatBytes(totalBytes)})`;
-      } else {
-        statusText = ` ${formatBytes(bytesDownloaded)}`;
-      }
-    }
-  } else if (match.downloadStatus === 'completed') {
-    // Just downloaded this session - green D
-    statusIndicator = 'D';
-    statusColor = theme.success;
-    statusText = ' Downloaded';
-  } else if (match.downloadStatus === 'previously_downloaded') {
-    // Previously downloaded (persisted) - blue D
-    statusIndicator = 'D';
-    statusColor = theme.primary; // Blue!
-    if (isFocused && match.downloadRecord) {
-      statusText = ` ${match.downloadRecord.filename}`;
-    }
-  } else if (match.downloadStatus === 'error') {
-    statusIndicator = '!';
-    statusColor = theme.error;
-    statusText = match.downloadProgress?.error ? ` ${match.downloadProgress.error}` : ' Error';
+  if (match.dvwDownloadStatus === 'downloading') {
+    dvwIndicator = <Spinner type="dots" />;
+    dvwColor = theme.warning;
+  } else if (match.dvwDownloadStatus === 'completed') {
+    dvwIndicator = '*';
+    dvwColor = theme.success;
+  } else if (match.dvwDownloadStatus === 'previously_downloaded') {
+    dvwIndicator = '*';
+    dvwColor = theme.primary;
+  } else if (match.dvwDownloadStatus === 'error') {
+    dvwIndicator = '!';
+    dvwColor = theme.error;
   } else {
-    // Show video status
-    switch (match.videoStatus) {
+    switch (match.dvwStatus) {
       case 'available':
-        statusIndicator = 'V';
-        statusColor = theme.success;
-        if (isFocused) statusText = ' [d to download]';
+        dvwIndicator = 'D';
+        dvwColor = theme.success;
         break;
       case 'unavailable':
-        statusIndicator = 'X';
-        statusColor = theme.error;
+        dvwIndicator = 'X';
+        dvwColor = theme.error;
         break;
       case 'checking':
-        statusIndicator = <Spinner type="dots" />;
-        statusColor = theme.warning;
+        dvwIndicator = <Spinner type="dots" />;
+        dvwColor = theme.warning;
         break;
       default:
-        statusIndicator = '?';
-        statusColor = theme.textDim;
+        dvwIndicator = '?';
+        dvwColor = theme.textDim;
+    }
+  }
+  
+  // Video status indicator
+  let videoIndicator: React.ReactNode;
+  let videoColor: string;
+  
+  if (match.videoDownloadRecord) {
+    // Video was previously downloaded
+    videoIndicator = '*';
+    videoColor = theme.primary;
+  } else {
+    switch (match.videoStatus) {
+      case 'available':
+        videoIndicator = 'V';
+        videoColor = theme.success;
+        break;
+      case 'unavailable':
+        videoIndicator = 'X';
+        videoColor = theme.error;
+        break;
+      case 'checking':
+        videoIndicator = <Spinner type="dots" />;
+        videoColor = theme.warning;
+        break;
+      default:
+        videoIndicator = '?';
+        videoColor = theme.textDim;
+    }
+  }
+  
+  // Status text for focused item
+  let statusText: string | null = null;
+  if (isFocused) {
+    if (match.dvwDownloadStatus === 'completed' || match.dvwDownloadStatus === 'previously_downloaded') {
+      statusText = match.dvwDownloadRecord?.filename || ' Downloaded';
+    } else if (match.dvwDownloadStatus === 'error') {
+      statusText = match.dvwDownloadProgress?.error || ' Error';
+    } else if (match.dvwStatus === 'available') {
+      statusText = ' [d to download DVW]';
     }
   }
   
@@ -1016,7 +1089,8 @@ function MatchItem({ match, isFocused, isSelected }: MatchItemProps) {
     <Box paddingLeft={2} flexDirection="column">
       <Text backgroundColor={bgColor}>
         <Text color={checkboxColor}>[{checkboxChar}]</Text>
-        <Text color={statusColor}>[{statusIndicator}]</Text>
+        <Text color={dvwColor}>[{dvwIndicator}]</Text>
+        <Text color={videoColor}>[{videoIndicator}]</Text>
         <Text color={isFocused ? theme.primary : theme.text}> {dateStr}</Text>
         <Text color={theme.textDim}> {timeStr}</Text>
         <Text color={theme.textMuted}> - </Text>
