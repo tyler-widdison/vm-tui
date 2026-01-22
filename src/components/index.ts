@@ -10,11 +10,11 @@ export { ErrorPage } from './ErrorPage.js';
 // Dashboard page
 export { DashboardPage } from './DashboardPage.js';
 
-// Content browser
-export { ContentBrowser } from './ContentBrowser.js';
+// Unified search page (replaces ContentBrowser, OtherMatchesPage, TeamDVWBrowser, OtherDVWBrowser)
+export { UnifiedSearchPage } from './UnifiedSearchPage.js';
 
-// Other matches browser
-export { OtherMatchesPage } from './OtherMatchesPage.js';
+// Content type selector modal
+export { ContentTypeSelector } from './ContentTypeSelector.js';
 
 // Fullscreen wrapper
 export { FullScreen } from './FullScreen.js';

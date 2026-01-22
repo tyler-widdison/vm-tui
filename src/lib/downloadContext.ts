@@ -6,6 +6,7 @@
 import { downloadVideo, downloadDVW, type DownloadProgress, type DownloadResult, type DownloadOptions } from './download.js';
 import { markAsDownloaded, markDVWAsDownloaded, type DownloadRecord, type ContentType } from './downloadTracker.js';
 import { generateVideoFilename } from './download.js';
+import { throttle } from './throttle.js';
 import type { MatchEvent, VideoInfo, DVWInfo } from './api.js';
 import type { HudlAuthData } from './auth.js';
 
@@ -57,6 +58,11 @@ class DownloadManager {
   private notifications: string[] = [];
   private listeners: Set<DownloadManagerListener> = new Set();
   private batchProgress: BatchProgress | null = null;
+  private throttledNotify: () => void;
+  
+  constructor() {
+    this.throttledNotify = throttle(() => this.notify(), 250);
+  }
   
   /**
    * Subscribe to state changes
@@ -85,7 +91,7 @@ class DownloadManager {
    */
   setBatchProgress(progress: BatchProgress | null) {
     this.batchProgress = progress;
-    this.notify();
+    this.throttledNotify();
   }
   
   /**
@@ -124,13 +130,13 @@ class DownloadManager {
    */
   addNotification(message: string, timeoutMs: number = 5000) {
     this.notifications.push(message);
-    this.notify();
+    this.throttledNotify();
     
     setTimeout(() => {
       const idx = this.notifications.indexOf(message);
       if (idx !== -1) {
         this.notifications.splice(idx, 1);
-        this.notify();
+        this.throttledNotify();
       }
     }, timeoutMs);
   }
@@ -142,7 +148,7 @@ class DownloadManager {
     const idx = this.notifications.indexOf(message);
     if (idx !== -1) {
       this.notifications.splice(idx, 1);
-      this.notify();
+      this.throttledNotify();
     }
   }
   
@@ -197,7 +203,7 @@ class DownloadManager {
     };
     
     this.activeDownloads.set(match.id, activeDownload);
-    this.notify();
+    this.throttledNotify();
     
     try {
       // Perform download with progress tracking
@@ -208,7 +214,7 @@ class DownloadManager {
           const download = this.activeDownloads.get(match.id);
           if (download) {
             download.progress = progress;
-            this.notify();
+            this.throttledNotify();
           }
         },
         options
@@ -245,13 +251,13 @@ class DownloadManager {
         this.addNotification(`Download failed: ${result.error || 'Unknown error'}`, 10000);
       }
       
-      this.notify();
+      this.throttledNotify();
       return result;
       
     } catch (err) {
       // Remove from active downloads on error
       this.activeDownloads.delete(match.id);
-      this.notify();
+      this.throttledNotify();
       
       const error = err instanceof Error ? err.message : 'Unknown error';
       this.addNotification(`Download failed: ${error}`, 10000);
@@ -295,7 +301,7 @@ class DownloadManager {
     };
     
     this.activeDownloads.set(dvwKey, activeDownload);
-    this.notify();
+    this.throttledNotify();
     
     try {
       // Perform download with progress tracking
@@ -307,7 +313,7 @@ class DownloadManager {
           const download = this.activeDownloads.get(dvwKey);
           if (download) {
             download.progress = progress;
-            this.notify();
+            this.throttledNotify();
           }
         },
         options
@@ -343,13 +349,13 @@ class DownloadManager {
         this.addNotification(`DVW download failed: ${result.error || 'Unknown error'}`, 10000);
       }
       
-      this.notify();
+      this.throttledNotify();
       return result;
       
     } catch (err) {
       // Remove from active downloads on error
       this.activeDownloads.delete(dvwKey);
-      this.notify();
+      this.throttledNotify();
       
       const error = err instanceof Error ? err.message : 'Unknown error';
       this.addNotification(`DVW download failed: ${error}`, 10000);

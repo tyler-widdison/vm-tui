@@ -142,3 +142,55 @@ export {
   clearTeamCache,
   type TeamSearchResult,
 } from './teamSearch.js';
+
+// Team mapping utilities (conference data from team_mapping.json)
+export {
+  loadTeamMapping,
+  buildConferenceList,
+  getTeamById,
+  getTeamByName,
+  getTeamsByConference,
+  getTeamsByConferenceName,
+  getConferences,
+  getConferenceById,
+  getConferenceByName,
+  getTeamConference,
+  isTeamInConference,
+  searchTeamsWithConference,
+  getConferenceDisplayName,
+  clearTeamMappingCache,
+  type MappedTeam,
+  type Conference,
+} from './teamMapping.js';
+
+// Content checker utilities
+export {
+  checkAllContentAvailability,
+  checkScoresheetAvailability,
+  generateScoresheetFilename,
+  createUnknownContentStatus,
+  createCheckingContentStatus,
+  availabilityToStatus,
+  getStatusChar,
+  getStatusColor,
+  type ContentTypeKey,
+  type ScoresheetInfo,
+  type UnifiedContentAvailability,
+  type ContentCheckStatus,
+} from './contentChecker.js';
+
+// Bulk downloader utilities
+export {
+  bulkDownload,
+  createDownloadDirectories,
+  getSelectedContentTypes,
+  countTotalDownloads,
+  formatBulkSummary,
+  type BulkContentType,
+  type BulkDownloadItem,
+  type BulkDownloadOptions,
+  type BulkDownloadProgress,
+  type BulkDownloadResult,
+  type BulkDownloadSummary,
+  type BulkProgressCallback,
+} from './bulkDownloader.js';

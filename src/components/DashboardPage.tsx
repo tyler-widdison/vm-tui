@@ -1,11 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import Spinner from 'ink-spinner';
 import { theme, borderStyle, app } from '../theme.js';
-import { ContentBrowser } from './ContentBrowser.js';
-import { OtherMatchesPage } from './OtherMatchesPage.js';
-import { TeamDVWBrowser } from './TeamDVWBrowser.js';
-import { OtherDVWBrowser } from './OtherDVWBrowser.js';
+import { UnifiedSearchPage } from './UnifiedSearchPage.js';
 import { Logo } from './Logo.js';
 import { downloadManager, formatBytes, type DownloadManagerState } from '../lib/index.js';
 import type { HudlAuthData } from '../lib/index.js';
@@ -22,10 +19,10 @@ interface DashboardPageProps {
   onLogout: () => void;
 }
 
-type DashboardView = 'overview' | 'my-videos' | 'other-videos' | 'team-dvw' | 'other-dvw';
+type DashboardView = 'overview' | 'unified-search';
 
 // Global status bar showing downloads and notifications
-function GlobalStatusBar({ state }: { state: DownloadManagerState }) {
+const GlobalStatusBar = React.memo(function GlobalStatusBar({ state }: { state: DownloadManagerState }) {
   const activeDownloads = Array.from(state.activeDownloads.values());
   const hasActiveDownloads = activeDownloads.length > 0;
   const hasNotifications = state.notifications.length > 0;
@@ -45,7 +42,7 @@ function GlobalStatusBar({ state }: { state: DownloadManagerState }) {
           </Text>
           <Text color={theme.accent}> Batch: </Text>
           <Text color={theme.text}>{state.batchProgress!.current}/{state.batchProgress!.total}</Text>
-          <Text color={theme.textMuted}> videos</Text>
+          <Text color={theme.textMuted}> items</Text>
         </Box>
       )}
       
@@ -76,16 +73,67 @@ function GlobalStatusBar({ state }: { state: DownloadManagerState }) {
       ))}
     </Box>
   );
-}
-
-type MenuItem = 'team-matches' | 'other-matches' | 'team-dvw' | 'other-dvw' | 'scoresheets';
-const MENU_ITEMS: MenuItem[] = ['team-matches', 'other-matches', 'team-dvw', 'other-dvw', 'scoresheets'];
-const ENABLED_ITEMS: MenuItem[] = ['team-matches', 'other-matches', 'team-dvw', 'other-dvw'];
+}, (prevProps, nextProps) => {
+  const prevState = prevProps.state;
+  const nextState = nextProps.state;
+  
+  const prevDownloads = Array.from(prevState.activeDownloads.values());
+  const nextDownloads = Array.from(nextState.activeDownloads.values());
+  
+  if (prevDownloads.length !== nextDownloads.length) {
+    return false;
+  }
+  
+  for (let i = 0; i < prevDownloads.length; i++) {
+    const prev = prevDownloads[i];
+    const next = nextDownloads[i];
+    
+    if (!prev || !next) {
+      return false;
+    }
+    
+    if (
+      prev.matchId !== next.matchId ||
+      prev.progress.bytesDownloaded !== next.progress.bytesDownloaded ||
+      prev.progress.totalBytes !== next.progress.totalBytes ||
+      prev.progress.percent !== next.progress.percent ||
+      prev.progress.status !== next.progress.status
+    ) {
+      return false;
+    }
+  }
+  
+  if (prevState.notifications.length !== nextState.notifications.length) {
+    return false;
+  }
+  
+  for (let i = 0; i < prevState.notifications.length; i++) {
+    if (prevState.notifications[i] !== nextState.notifications[i]) {
+      return false;
+    }
+  }
+  
+  const prevBatch = prevState.batchProgress;
+  const nextBatch = nextState.batchProgress;
+  
+  if (prevBatch === null && nextBatch === null) {
+    return true;
+  }
+  
+  if (prevBatch === null || nextBatch === null) {
+    return false;
+  }
+  
+  if (prevBatch.current !== nextBatch.current || prevBatch.total !== nextBatch.total) {
+    return false;
+  }
+  
+  return true;
+});
 
 export function DashboardPage({ authData, userInfo, onLogout }: DashboardPageProps) {
   const { exit } = useApp();
   const [view, setView] = useState<DashboardView>('overview');
-  const [selectedItem, setSelectedItem] = useState<MenuItem>('team-matches');
   const [downloadState, setDownloadState] = useState<DownloadManagerState>(() => downloadManager.getState());
   
   // Subscribe to download manager state changes
@@ -104,46 +152,9 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
       onLogout();
     }
     
-    // Hotkeys still work
-    if (input === 'v') {
-      setView('my-videos');
-    }
-    if (input === 'o') {
-      setView('other-videos');
-    }
-    if (input === 'd') {
-      setView('team-dvw');
-    }
-    if (input === 'e') {
-      setView('other-dvw');
-    }
-    
-    // Arrow key navigation
-    if (key.upArrow || input === 'k') {
-      const idx = MENU_ITEMS.indexOf(selectedItem);
-      if (idx > 0) {
-        setSelectedItem(MENU_ITEMS[idx - 1]!);
-      }
-    }
-    if (key.downArrow || input === 'j') {
-      const idx = MENU_ITEMS.indexOf(selectedItem);
-      if (idx < MENU_ITEMS.length - 1) {
-        setSelectedItem(MENU_ITEMS[idx + 1]!);
-      }
-    }
-    
-    // Enter to select
-    if (key.return) {
-      if (selectedItem === 'team-matches') {
-        setView('my-videos');
-      } else if (selectedItem === 'other-matches') {
-        setView('other-videos');
-      } else if (selectedItem === 'team-dvw') {
-        setView('team-dvw');
-      } else if (selectedItem === 'other-dvw') {
-        setView('other-dvw');
-      }
-      // scoresheets still disabled
+    // Search hotkey
+    if (input === 's' || key.return) {
+      setView('unified-search');
     }
   });
 
@@ -151,8 +162,8 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
     t => t.id === (authData.activeAccountId ? undefined : t.id)
   ) || userInfo.teams[0];
 
-  // Render my videos browser view
-  if (view === 'my-videos') {
+  // Render unified search view
+  if (view === 'unified-search') {
     return (
       <Box
         flexDirection="column"
@@ -180,134 +191,8 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
             )}
           </Box>
           
-          {/* Content browser */}
-          <ContentBrowser
-            authData={authData}
-            onBack={() => setView('overview')}
-          />
-        </Box>
-        
-        {/* Global status bar */}
-        <GlobalStatusBar state={downloadState} />
-      </Box>
-    );
-  }
-
-  // Render other videos browser view
-  if (view === 'other-videos') {
-    return (
-      <Box
-        flexDirection="column"
-        width="100%"
-        height="100%"
-      >
-        <Box
-          flexDirection="column"
-          borderStyle={borderStyle}
-          borderColor={theme.border}
-          paddingX={2}
-          paddingY={1}
-          flexGrow={1}
-        >
-          {/* Header bar */}
-          <Box marginBottom={1}>
-            <Text color={theme.primary} bold>{app.name}</Text>
-            <Text color={theme.textDim}> - </Text>
-            <Text color={theme.text}>{userInfo.name}</Text>
-            {activeTeam && (
-              <>
-                <Text color={theme.textDim}> | </Text>
-                <Text color={theme.accent}>{activeTeam.name}</Text>
-              </>
-            )}
-          </Box>
-          
-          {/* Other matches browser */}
-          <OtherMatchesPage
-            authData={authData}
-            onBack={() => setView('overview')}
-          />
-        </Box>
-        
-        {/* Global status bar */}
-        <GlobalStatusBar state={downloadState} />
-      </Box>
-    );
-  }
-
-  // Render team DVW browser view
-  if (view === 'team-dvw') {
-    return (
-      <Box
-        flexDirection="column"
-        width="100%"
-        height="100%"
-      >
-        <Box
-          flexDirection="column"
-          borderStyle={borderStyle}
-          borderColor={theme.border}
-          paddingX={2}
-          paddingY={1}
-          flexGrow={1}
-        >
-          {/* Header bar */}
-          <Box marginBottom={1}>
-            <Text color={theme.primary} bold>{app.name}</Text>
-            <Text color={theme.textDim}> - </Text>
-            <Text color={theme.text}>{userInfo.name}</Text>
-            {activeTeam && (
-              <>
-                <Text color={theme.textDim}> | </Text>
-                <Text color={theme.accent}>{activeTeam.name}</Text>
-              </>
-            )}
-          </Box>
-          
-          {/* Team DVW browser */}
-          <TeamDVWBrowser
-            authData={authData}
-            onBack={() => setView('overview')}
-          />
-        </Box>
-        
-        {/* Global status bar */}
-        <GlobalStatusBar state={downloadState} />
-      </Box>
-    );
-  }
-
-  // Render other DVW browser view
-  if (view === 'other-dvw') {
-    return (
-      <Box
-        flexDirection="column"
-        width="100%"
-        height="100%"
-      >
-        <Box
-          flexDirection="column"
-          borderStyle={borderStyle}
-          borderColor={theme.border}
-          paddingX={2}
-          paddingY={1}
-          flexGrow={1}
-        >
-          {/* Header bar */}
-          <Box marginBottom={1}>
-            <Text color={theme.primary} bold>{app.name}</Text>
-            <Text color={theme.textDim}> - </Text>
-            <Text color={theme.text}>{userInfo.name}</Text>
-            {activeTeam && (
-              <>
-                <Text color={theme.textDim}> | </Text>
-                <Text color={theme.accent}>{activeTeam.name}</Text>
-              </>
-            )}
-          </Box>
-          
-          {/* Other DVW browser */}
-          <OtherDVWBrowser
+          {/* Unified search page */}
+          <UnifiedSearchPage
             authData={authData}
             onBack={() => setView('overview')}
           />
@@ -395,53 +280,36 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
           paddingX={1}
           marginY={1}
         >
-          <Text color={theme.text} bold>Navigation</Text>
-          <Text color={theme.textDim}>Use arrows or hotkeys, Enter to select</Text>
+          <Text color={theme.text} bold>Quick Actions</Text>
+          <Text color={theme.textDim}>Press Enter or 's' to start</Text>
           <Box marginTop={1}>
-            <Text 
-              backgroundColor={selectedItem === 'team-matches' ? theme.backgroundElement : undefined}
-              color={selectedItem === 'team-matches' ? theme.primary : theme.text}
-            >
-              {selectedItem === 'team-matches' ? '>' : ' '}
-              <Text color={theme.primary}>[v]</Text> {activeTeam?.name || 'My'} Matches - video
+            <Text color={theme.primary} bold>
+              {'>'} <Text color={theme.success}>[s]</Text> Search All Content
             </Text>
           </Box>
-          <Box>
-            <Text 
-              backgroundColor={selectedItem === 'other-matches' ? theme.backgroundElement : undefined}
-              color={selectedItem === 'other-matches' ? theme.primary : theme.text}
-            >
-              {selectedItem === 'other-matches' ? '>' : ' '}
-              <Text color={theme.primary}>[o]</Text> Other Matches - video
+          <Box marginTop={1}>
+            <Text color={theme.textMuted}>
+              Search for matches by team and date, then download videos, DVW files, and scoresheets.
+              Filter by conference to narrow results.
             </Text>
           </Box>
-          <Box>
-            <Text 
-              backgroundColor={selectedItem === 'team-dvw' ? theme.backgroundElement : undefined}
-              color={selectedItem === 'team-dvw' ? theme.primary : theme.text}
-            >
-              {selectedItem === 'team-dvw' ? '>' : ' '}
-              <Text color={theme.primary}>[d]</Text> DVW Files - {activeTeam?.name}
-            </Text>
-          </Box>
-          <Box>
-            <Text 
-              backgroundColor={selectedItem === 'other-dvw' ? theme.backgroundElement : undefined}
-              color={selectedItem === 'other-dvw' ? theme.primary : theme.text}
-            >
-              {selectedItem === 'other-dvw' ? '>' : ' '}
-              <Text color={theme.primary}>[e]</Text> Other DVW Files
-            </Text>
-          </Box>
-          <Box>
-            <Text 
-              backgroundColor={selectedItem === 'scoresheets' ? theme.backgroundElement : undefined}
-              color={theme.textDim}
-            >
-              {selectedItem === 'scoresheets' ? '>' : ' '}
-              <Text color={theme.textDim}>[s]</Text> Scoresheets - {activeTeam?.name} (coming soon)
-            </Text>
-          </Box>
+        </Box>
+
+        {/* Feature highlights */}
+        <Box flexDirection="column" marginY={1}>
+          <Text color={theme.accent} bold>Features:</Text>
+          <Text color={theme.text}>
+            <Text color={theme.info}>[1]</Text> Conference filtering (optional)
+          </Text>
+          <Text color={theme.text}>
+            <Text color={theme.info}>[2]</Text> Team search with autocomplete
+          </Text>
+          <Text color={theme.text}>
+            <Text color={theme.info}>[3]</Text> View Video, DVW, Scoresheet availability
+          </Text>
+          <Text color={theme.text}>
+            <Text color={theme.info}>[4]</Text> Bulk download with organized folders
+          </Text>
         </Box>
 
         {/* Footer */}
@@ -455,10 +323,7 @@ export function DashboardPage({ authData, userInfo, onLogout }: DashboardPagePro
           marginTop={1}
         >
           <Text color={theme.textDim}>
-            <Text color={theme.textMuted}>'v'</Text> team videos  
-            <Text color={theme.textMuted}> 'o'</Text> other videos  
-            <Text color={theme.textMuted}> 'd'</Text> team DVW  
-            <Text color={theme.textMuted}> 'e'</Text> other DVW  
+            <Text color={theme.success}>'s'/Enter</Text> search  
             <Text color={theme.textMuted}> 'l'</Text> logout  
             <Text color={theme.textMuted}> 'q'</Text> quit
           </Text>
