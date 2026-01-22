@@ -1,7 +1,3 @@
-                                          ▄▄  
-▄▄  ▄▄  ▄▄▄▄▄▄          ▄██▄▄▄  ▄▄  ▄▄  ▄▄▄▄  
-██  ██  ██ █ █  ▀▀▀▀▀▀   ██     ██  ██    ██  
- ▀██▀   ██ █ █           ▀█▄▄▄  ▀█▄▄██  ▄▄██▄▄
 
 The purpose is to provide users of volleymetrics an alternative method to gather video and dvw files.
 
